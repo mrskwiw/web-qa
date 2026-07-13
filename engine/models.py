@@ -164,6 +164,7 @@ class GateCheckResult(Serializable):
     name: str
     passed: bool
     detail: Optional[str] = None
+    advisory: bool = False  # reported but does NOT count toward gate.passed
 
 
 @dataclass

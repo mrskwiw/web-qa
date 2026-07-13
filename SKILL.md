@@ -58,7 +58,7 @@ Read the snapshot and, for each candidate interaction, decide **what a reasonabl
 python -m engine.cli act --url <URL> --action '{"type":"click","selector":"<sel>","inferred_intent":"<what you expect>"}' [--screenshot <path>]
 ```
 
-`type` ∈ `navigate|click|fill|type|press|scroll|wait_for`. Each call returns an **evidence bundle** with a `gate` result. The gate runs seven objective checks: `no_console_errors`, `http_status_ok`, `no_crash`, `no_error_page`, `navigation_sane`, `opened_pages_ok` (new-tab/external links), `target_survived`.
+`type` ∈ `navigate|click|fill|type|press|scroll|wait_for`. Each call returns an **evidence bundle** with a `gate` result. Six **authoritative** checks decide `gate.passed`: `no_console_errors`, `http_status_ok`, `no_crash`, `no_error_page`, `navigation_sane`, `opened_pages_ok` (new-tab/external links). A seventh, `target_survived`, is **advisory** (`advisory: true`) — reported so you can weigh a vanished element, but it never fails the gate, because a disappearance is a semantic signal (often normal), not objective breakage.
 
 **Gate-first short-circuit (cost control):**
 - If `gate.passed == false` → record a **deterministic** issue from the failing check(s) and **do NOT spend judgment on it** — the breakage is objective and authoritative. Move to the next interaction.

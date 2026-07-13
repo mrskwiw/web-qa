@@ -12,7 +12,10 @@ Checks (spec §6):
 - ``no_crash``          — no unhandled page exception
 - ``no_error_page``     — did not land on a recognizable 404/500/error template
 - ``navigation_sane``   — no dead-end URL (about:blank/empty) or redirect loop
-- ``target_survived``   — the acted-on element did not vanish without navigating (softest check)
+- ``target_survived``   — the acted-on element did not vanish without navigating.
+  **Advisory** (``advisory=True``): reported but does NOT count toward
+  ``gate.passed`` — a vanished element is a semantic signal for the agent, not
+  objective breakage, so it must not short-circuit the AI judgment.
 """
 
 from __future__ import annotations
@@ -39,6 +42,7 @@ class DeterministicGate:
     """Evaluate the objective checks over one :class:`EvidenceBundle`."""
 
     def evaluate(self, bundle: EvidenceBundle) -> GateResult:
+        # Six authoritative checks — objective breakage that short-circuits AI.
         checks = [
             self._no_console_errors(bundle),
             self._http_status_ok(bundle),
@@ -46,9 +50,18 @@ class DeterministicGate:
             self._no_error_page(bundle),
             self._navigation_sane(bundle),
             self._opened_pages_ok(bundle),
-            self._target_survived(bundle),
         ]
-        return GateResult(passed=all(c.passed for c in checks), checks=checks)
+        # target_survived is ADVISORY: "element vanished" is a *semantic* signal
+        # (a vanish is normal on many real interactions), so it is reported for
+        # the agent to weigh but does NOT fail the gate or short-circuit the AI's
+        # outcome-verification judgment. (Making it authoritative caused adversarial
+        # reviews to oscillate on its threshold — BUGS.md 2026-07-13.)
+        ts = self._target_survived(bundle)
+        ts.advisory = True
+        checks.append(ts)
+        return GateResult(
+            passed=all(c.passed for c in checks if not c.advisory), checks=checks
+        )
 
     @staticmethod
     def _no_console_errors(b: EvidenceBundle) -> GateCheckResult:
