@@ -135,10 +135,12 @@ Then give the user an in-session summary: what was tested, issues found (determi
 
 ## Security sweep — endpoint auth enforcement (thorough audits)
 
-On a thorough audit, in addition to the UI pass, verify the backend actually enforces authentication/authorization. This is the one HTTP-level check (not browser-driven):
+On a thorough audit, in addition to the UI pass, verify the backend actually enforces authentication/authorization. Run it with the engine: `python -m engine.cli sweep --url <BASE> --token-env <VAR>`. This is the one HTTP-level check (not browser-driven).
+
+**Safe by default.** The sweep probes only read-only (GET) endpoints unless you pass `--include-mutating`; probing a write verb sends a *real* request that would **execute** on an unprotected endpoint (a live `DELETE`/`cache-clear`). Only add `--include-mutating` against a **test** target you own, and it will disclose how many mutating endpoints it withheld. Manual method:
 
 1. **Enumerate the API surface.** If the app exposes an OpenAPI spec (`/openapi.json`, `/docs`), pull every `(method, path)`. Otherwise collect the endpoints observed in the network logs during the UI pass.
-2. **Call each endpoint twice** — once with **no** `Authorization` header, once with a valid token — and compare status. Substitute dummy values for path params (`{id}` → a real id from an authenticated list call, or a throwaway).
+2. **Call each endpoint twice** — once with **no** `Authorization` header, once with a valid token — and compare status. Substitute dummy values for path params (`{id}` → a real id from an authenticated list call, or a throwaway). Withhold mutating verbs on any target you don't own.
 3. **Flag any endpoint that should be protected but returns 2xx (or runs to a 500) without a token** — especially state-mutating (`POST`/`PUT`/`PATCH`/`DELETE`) and anything exposing data or internals. Watch for **duplicate routes**: a protected action re-exposed under a second unauthenticated path (e.g. an authed `/api/cache/clear` twinned by an open `/api/health/cache/clear`). Give admin/user-management, database backup/restore, privacy delete/anonymize, credit adjust/grant, and profiling/health-internal endpoints the closest look — an unauthenticated hit there is critical.
 4. **Legitimately public** (do not flag): `login`/`register`/`refresh`, health *liveness/readiness* probes, static assets, stateless public calculators, and signature-gated webhooks. On a test instance you may confirm an exposure by actually invoking it; note exactly what you triggered.
 

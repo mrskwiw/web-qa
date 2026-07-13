@@ -289,13 +289,31 @@ def flow(
     help="Env var holding a bearer token for the authenticated baseline probe.",
 )
 @click.option(
+    "--include-mutating",
+    is_flag=True,
+    default=False,
+    help="Also probe POST/PUT/PATCH/DELETE. These send REAL requests that WOULD "
+    "execute on an unprotected endpoint (delete/clear/etc) — use only on test "
+    "targets. Default: skip them (safe) and report how many were skipped.",
+)
+@click.option(
     "--output", type=click.Path(), default=None, help="Also write sweep JSON here."
 )
-def sweep(url: str, openapi: str, token_env: str | None, output: str | None) -> None:
-    """Auth-enforcement sweep: probe every endpoint with/without a token (spec §6.1)."""
+def sweep(
+    url: str,
+    openapi: str,
+    token_env: str | None,
+    include_mutating: bool,
+    output: str | None,
+) -> None:
+    """Auth-enforcement sweep: probe endpoints with/without a token (spec §6.1).
+
+    Safe by default — read-only (GET) probes; pass --include-mutating on a test
+    target to also probe write verbs (which can execute on exposed endpoints).
+    """
     token = os.environ.get(token_env) if token_env else None
     spec = security.load_openapi(openapi, url)
-    result = security.sweep(url, spec, token=token)
+    result = security.sweep(url, spec, token=token, include_mutating=include_mutating)
     _emit(result.to_dict(), output)
 
 

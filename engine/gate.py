@@ -131,22 +131,26 @@ class DeterministicGate:
     def _target_survived(b: EvidenceBundle) -> GateCheckResult:
         # Softest check, deliberately lenient to avoid false short-circuits:
         # only fails when an element was acted on, the page did NOT navigate,
-        # nothing was triggered, and the element is gone — i.e. it vanished for
-        # no reason. A submit/run button that fires a request and then disables,
-        # relabels, or is replaced is normal, so any network activity (or a
-        # matched-then-changed text selector) is treated as "did something".
+        # nothing meaningful was triggered, and the element is gone. A submit/run
+        # button that fires a WRITE and then disables/relabels/is replaced is
+        # normal — but an *idempotent* GET (e.g. an analytics beacon) is NOT a
+        # good reason for the target to vanish, so a read-only ping no longer
+        # excuses a disappearance.
         if b.target_present is None:
             return GateCheckResult("target_survived", True, "n/a (no selector)")
         if b.url_after != b.url_before:
             return GateCheckResult("target_survived", True, "n/a (navigated)")
         if b.target_present:
             return GateCheckResult("target_survived", True)
-        if b.http or b.opened:
+        wrote = any(c.method.upper() not in ("GET", "HEAD", "OPTIONS") for c in b.http)
+        if wrote or b.opened:
             return GateCheckResult(
-                "target_survived", True, "n/a (action triggered network activity)"
+                "target_survived",
+                True,
+                "n/a (action performed a write / opened a page)",
             )
         return GateCheckResult(
             "target_survived",
             False,
-            "acted-on element vanished with no navigation or network activity",
+            "acted-on element vanished with no navigation and no write",
         )

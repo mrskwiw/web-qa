@@ -70,6 +70,22 @@ _SENSITIVE = (
     "debug",
     "internal",
 )
+# Fragments implying user/private data — never treat as public even under an
+# allowlisted prefix, so a sensitive sibling (e.g. /api/pricing/history) can't
+# slip through a broad prefix allow as a false negative.
+_SENSITIVE_OVERRIDE = (
+    "history",
+    "/me",
+    "/mine",
+    "account",
+    "export",
+    "download",
+    "private",
+    "secret",
+    "credential",
+    "/user",
+    "session",
+)
 _MUTATING = {"POST", "PUT", "PATCH", "DELETE"}
 
 
@@ -91,10 +107,37 @@ def substitute_params(path: str, dummy: str = "test-id-0") -> str:
 
 
 def is_public(path: str) -> bool:
-    """Whether an endpoint is allowed to answer unauthenticated."""
+    """Whether an endpoint is allowed to answer unauthenticated.
+
+    Public only if it is on the allowlist AND does not look sensitive: the
+    fragment guard stops a private sibling under a broad prefix (e.g.
+    ``/api/pricing/history``, ``/api/auth/me``) from being silently treated as
+    public — a false negative erring toward *flagging for review*, which is the
+    safe direction for a security check.
+    """
+    low = path.lower()
+    if any(s in low for s in _SENSITIVE_OVERRIDE):
+        return False
     if path in _PUBLIC_EXACT or path in _PUBLIC_EXTRA:
         return True
     return any(path.startswith(p) for p in _PUBLIC_PREFIXES)
+
+
+def filter_probeable(
+    endpoints: List[Tuple[str, str]], include_mutating: bool
+) -> Tuple[List[Tuple[str, str]], int]:
+    """Split endpoints into (to-probe, count-of-skipped-mutating).
+
+    Safe by default: probing a mutating verb (POST/PUT/PATCH/DELETE) sends a real
+    request that WOULD execute on an unprotected endpoint — exactly the exposure
+    the sweep hunts — so a ``DELETE`` or ``cache/clear`` could destroy/alter data
+    on a non-test target. They are skipped unless ``include_mutating`` is set.
+    The skipped count is disclosed in the result (no silent truncation).
+    """
+    if include_mutating:
+        return list(endpoints), 0
+    keep = [(m, p) for (m, p) in endpoints if m.upper() not in _MUTATING]
+    return keep, len(endpoints) - len(keep)
 
 
 def classify(
@@ -110,6 +153,8 @@ def classify(
     rejected — i.e. it returned a success (2xx) or ran to a 5xx (meaning it
     executed past any auth check). 401/403/404/405 without a token are fine;
     422 (body validation) is ambiguous and left to the agent (not flagged here).
+    ``status_with_token`` is recorded for context only; the verdict depends
+    solely on the no-token response.
     """
     if is_public(path):
         return None
@@ -180,6 +225,8 @@ class Finding(Serializable):
 class SweepResult(Serializable):
     base_url: str
     swept: int
+    include_mutating: bool = False
+    skipped_mutating: int = 0  # mutating endpoints not probed (safe default)
     flagged: List[Finding] = field(default_factory=list)
     duplicate_notes: List[str] = field(default_factory=list)
     errors: List[str] = field(default_factory=list)
@@ -235,43 +282,57 @@ def sweep(
     base_url: str,
     openapi: Dict[str, Any],
     token: Optional[str] = None,
+    include_mutating: bool = False,
     max_workers: int = 12,
     timeout: float = 30.0,
 ) -> SweepResult:
-    """Probe every enumerated endpoint with/without a token and flag exposures."""
-    endpoints = enumerate_endpoints(openapi)
+    """Probe enumerated endpoints with/without a token and flag exposures.
+
+    Safe by default: mutating verbs are skipped unless ``include_mutating`` is
+    set (see :func:`filter_probeable`). Each worker returns ``(finding, error)``
+    so nothing is appended to shared lists across threads.
+    """
+    endpoints, skipped = filter_probeable(
+        enumerate_endpoints(openapi), include_mutating
+    )
     findings: List[Finding] = []
     errors: List[str] = []
 
-    def _run(pair: Tuple[str, str]) -> Optional[Finding]:
+    def _run(pair: Tuple[str, str]) -> Tuple[Optional[Finding], Optional[str]]:
         method, path = pair
         try:
             no_tok, with_tok = probe(base_url, method, path, token, timeout)
-        except Exception as e:  # noqa: BLE001
-            errors.append(f"{method} {path}: {e}")
-            return None
+        except Exception as e:  # noqa: BLE001 — one bad probe must not sink the sweep
+            return None, f"{method} {path}: {e}"
         verdict = classify(method, path, no_tok, with_tok)
         if verdict:
-            return Finding(
-                method=method,
-                path=path,
-                status_no_token=no_tok,
-                status_with_token=with_tok,
-                severity=verdict["severity"],
-                reason=verdict["reason"],
+            return (
+                Finding(
+                    method=method,
+                    path=path,
+                    status_no_token=no_tok,
+                    status_with_token=with_tok,
+                    severity=verdict["severity"],
+                    reason=verdict["reason"],
+                ),
+                None,
             )
-        return None
+        return None, None
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
-        for result in pool.map(_run, endpoints):
-            if result is not None:
-                findings.append(result)
+        for finding, err in pool.map(_run, endpoints):
+            if finding is not None:
+                findings.append(finding)
+            if err is not None:
+                errors.append(err)
 
     order = {"critical": 0, "high": 1, "medium": 2}
     findings.sort(key=lambda f: (order.get(f.severity, 9), f.path))
     return SweepResult(
         base_url=base_url,
         swept=len(endpoints),
+        include_mutating=include_mutating,
+        skipped_mutating=skipped,
         flagged=findings,
         duplicate_notes=find_duplicate_exposures(findings),
         errors=errors,
