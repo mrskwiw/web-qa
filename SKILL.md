@@ -1,0 +1,157 @@
+---
+name: web-qa
+description: AI-assisted web-application QA — a replacement for human QA, not a technical checker. Enters the app as a real user with real goals and simulates end-to-end journeys in a headless browser: infers what each step should accomplish, captures evidence (DOM, console, network, screenshot), applies fast deterministic gates, then reads the produced output and judges whether the user's goal was actually achieved with good results — catching bugs that pass every objective check but are still wrong (silent no-ops, wrong/empty content, misleading state, broken links, billed actions that produce nothing). Use when asked to test, verify, or QA a web page or web app; check that a UI or user flow actually works; smoke-test a site; or find functional/UX bugs a linter cannot. Runs inside a Claude Code session; needs no API key.
+---
+
+# web-qa
+
+## Mission — you are a replacement for human QA
+
+**Your job is to be the QA tester a real user never gets: enter the app as a real person with a real goal and find out whether the app actually serves that goal.** This is *not*, at heart, a technical evaluation — even though it does that too. A human QA tester doesn't think "let me click element `a.cta`"; they think "I'm a small-business owner here to research a client and generate a month of content — can I actually get that done, and is what I get any good?" **Test like that person.**
+
+- **Think in journeys and personas, not interactions.** Before testing, enumerate the *end-to-end journeys* real users attempt for this app (sign up → onboard; create a client → run research → generate → export; find and fix a mistake). Drive each journey to its goal with the `flow` subcommand. Isolated clicks are a means, not the mission.
+- **Cover the unhappy paths a human would hit.** Invalid input, empty states, partial completion, going back, re-entering, a slow/failed step and recovering. Real users don't follow the happy path; neither should you.
+- **The top-level question is always "did this achieve the user's actual goal, with good output?"** — not "did it return 200." That is why outcome verification (§3b) is mandatory: a human tester reads the result and judges it, and so do you.
+- **Report like a QA tester, not a linter.** Frame findings as "a user trying to X hits Y" with severity to the user's goal. The gates, security sweep, and console/network checks below are *instruments in service of this* — they catch the objective breakage so your judgment can focus on whether the experience works.
+
+Everything below is how to execute that mission rigorously.
+
+You are the **reasoning half** of a QA system. A deterministic Python engine under `engine/` is your hands: it drives a real browser, captures structured evidence, and runs objective gate checks. It never judges — **you** infer what a page *should* do and decide whether what actually happened is appropriate.
+
+The engine catches objective breakage (console errors, HTTP ≥400, crashes, broken links). You catch the rest: a button that "works" but does nothing, the wrong content, a misleading state — the bugs objective checks can't express.
+
+**Drive the real UI, not the API.** All functional testing goes through the headless browser (clicks, typing, form submits) — never by calling the app's HTTP API directly. The client wiring and render layer is exactly where most user-facing bugs live (a crash on render, a button that never wires its handler, a state that never updates); hitting the API bypasses all of it and tests the wrong thing. The **only** exception is the security sweep (below), which is an HTTP-level auth-enforcement check by nature.
+
+## Setup (once)
+
+Run from this skill directory (`.claude/skills/web-qa/`):
+
+```bash
+pip install -r requirements.txt && python -m playwright install chromium
+```
+
+All engine commands are `python -m engine.cli …` run from here. Output is JSON on stdout (add `--output <file>` to also save it).
+
+## Workflow
+
+### 0. Explore
+
+```bash
+python -m engine.cli explore --url <URL>
+```
+
+Returns a `PageSnapshot`: `interactive` (elements ranked by importance, `rank` 0=primary CTA), `forms` (with `destructive` flag + `submit` selector), `links` (with `external`/`new_tab`/`scheme` flags), and initial `console`.
+
+### 1. Infer expectations (you, in-context)
+
+Read the snapshot and, for each candidate interaction, decide **what a reasonable, correct outcome would be** — the intent. There is no supplied test script; infer from structure and convention:
+
+- A nav/link labeled "Games" should lead somewhere about games; a "Submit"/"Add to cart" should produce a visible state change or confirmation; a form should accept valid input and reject invalid.
+- **Infer the *outcome*, not just the *reaction*.** For an action that produces content — a search, a generation, "run research," a report/export — write down what a **good result actually contains**, specific to the inputs. Not "keyword research returns something," but "for a project-management SaaS, expect a non-empty list of on-topic keywords (e.g. 'project management', 'team collaboration') — not an empty list, an error, or generic filler." This concrete expectation is what you check the produced artifact against in step 3b; without it, "it returned 200" masquerades as success.
+- **Rank and cap.** Test the most important interactions first (CTAs → primary nav → forms → incidental links). **Cap at 15 by default** (`--max-actions`; use ~5 for a smoke check, up to ~40 for a thorough audit). If you skip candidates because of the cap, **say so in the report** ("tested 15/32; re-run for full coverage").
+- **Prefer unique selectors.** The snapshot may list several elements sharing a class (e.g. two `a.font-display.text-xl`). Target the intended one with an id, `[data-testid]`, `[name=…]`, or a Playwright text selector like `text="About"` — not just the first class match.
+- **Skip non-navigating schemes.** Links with `scheme` `mailto`/`tel` legitimately don't navigate — don't test them as if they should, and don't flag them as no-ops.
+
+### 2. Act + gate (per expectation)
+
+```bash
+python -m engine.cli act --url <URL> --action '{"type":"click","selector":"<sel>","inferred_intent":"<what you expect>"}' [--screenshot <path>]
+```
+
+`type` ∈ `navigate|click|fill|type|press|scroll|wait_for`. Each call returns an **evidence bundle** with a `gate` result. The gate runs seven objective checks: `no_console_errors`, `http_status_ok`, `no_crash`, `no_error_page`, `navigation_sane`, `opened_pages_ok` (new-tab/external links), `target_survived`.
+
+**Gate-first short-circuit (cost control):**
+- If `gate.passed == false` → record a **deterministic** issue from the failing check(s) and **do NOT spend judgment on it** — the breakage is objective and authoritative. Move to the next interaction.
+- If `gate.passed == true` → proceed to judge (step 3).
+
+**Screenshot only when it adds evidence** — on a gate failure or an interaction you're about to flag, not every action.
+
+### 3. Judge appropriateness (you, in-context)
+
+For gate-passing actions, compare the evidence against your `inferred_intent`. Ask:
+
+- Did the action produce the **kind of change** a user would expect (navigation, state update, confirmation, revealed content)? A 200 with **no observable effect** on an action that implies one is **inappropriate**.
+- Is the resulting content **coherent and relevant** (not a wrong page, placeholder, or stale state)?
+- For forms: does valid input proceed, and invalid input surface an appropriate message (not a silent accept, not a crash)?
+
+Emit a verdict: **`appropriate`** (no issue), **`inappropriate`** (→ AI issue with `severity`), or **`uncertain`**. Include 1–3 sentences of `reasoning` citing the evidence, and `confidence` (low/med/high).
+
+- **Bias toward `uncertain` over false positives.** If a URL didn't change, investigate *why* before flagging (it may be a `mailto:`, an in-page anchor, or a modal) — don't assume a no-op is a bug.
+- **AI issues are advisory**, never authoritative. Never override a passing deterministic gate to call something "objectively broken."
+
+### 3a. Multi-step & authenticated flows — validate every step
+
+Real apps hide most functionality behind login and multi-step journeys (wizards, checkout, create→edit→delete). To test these you must maintain browser state across actions, which the stateless `act` cannot do in one call — until a `flow` mode exists (see limitations), drive such flows with a single browser context you control.
+
+**Validate each step before executing the next. Never fire step N+1 assuming step N succeeded.** After every action, assert the expected state change actually happened — the write request fired and returned 2xx, the status/DOM updated, no error surfaced. If the assertion fails, **stop and record the failure at that step**; do not run later steps on top of it. Barrelling ahead produces two failures at once: you miss the real bug's location, and you generate garbage downstream evidence (later steps "fail" only because the state they needed was never created).
+
+This cuts both ways as a false-positive guard: if a "Save" looks like a no-op, confirm the action truly triggered (button enabled, click landed, required fields valid) **before** flagging it — a silent no-op is a real bug, but a harness that never triggered the save is not.
+
+### 3b. Outcome verification — read the produced artifact and judge it (mandatory for output-producing actions)
+
+**A passing gate is not success. `200 OK` + "credits deducted" only proves the mechanism fired — never that the output is good.** For any action that is supposed to *produce* something (search results, a generation, a research run, a saved record you can re-open, a report/export), you must **retrieve the produced artifact, read its actual content, and judge it against the outcome you inferred in step 1.** Do not close the loop on the request status.
+
+1. **Get the output where the user would see it.** Read the evidence bundle's `content_after` (the readable rendered text). If the result lives on another view (a results tab, a detail page, a downloaded file), **drive there and read it** — navigate to the results/detail route, open the record, or fetch the export. The output is often not on the page where you triggered it.
+2. **Judge the content against the inferred outcome.** Is it **non-empty**, **on-topic**, **coherent**, and **specific to the inputs** — or is it empty, an error object, a placeholder, stale, or generic filler? Cross-check persisted fields: after "run research," the client's keywords/competitors should be populated; after "generate," posts should exist and read sensibly; after "save", re-opening shows your values.
+3. **A billed/confirmed action with empty or irrelevant output is a real (often high-severity) bug** — it is invisible at the gate and is exactly what this skill exists to catch. Flag it with the evidence (what you expected vs. the empty/garbage artifact you found).
+
+For the deterministic layer, a `flow` step can assert `content_contains` / `content_absent` (e.g. result panel shows the entity, and does **not** say "No results"/"Error") — but those are only a coarse net. **Whether the produced content is genuinely good is your semantic judgment, and it is not optional for output-producing actions.**
+
+> Real example (2026-07-12, content-jumpstart): "Run research" returned `200` and deducted 200 credits — step "passed." Reading the produced client showed `keywords: []`, `competitors: []`, `results: total 0` — the tool billed for research and produced nothing. Only reading the artifact caught it.
+
+### 4. Report
+
+Assemble a results object and render it. **Save every report under the repository-root `reports/` directory** (create it if missing), in a per-run folder named `<site-slug>-<YYYY-MM-DD>`:
+
+- **`site-slug`** — the page `<title>` from the explore snapshot, slugified (lowercase, spaces/punctuation → `-`); fall back to the target hostname when the title is empty or generic. E.g. title "Operator Dashboard" on `content-jumpstart-backend.onrender.com` → prefer the hostname slug `content-jumpstart-backend`.
+- **`YYYY-MM-DD`** — today's date.
+- From the skill dir, the repo-root `reports/` is `../../../reports/`.
+
+```bash
+# e.g. site-slug=content-jumpstart-backend, date=2026-07-12
+python -m engine.cli report --input results.json --output ../../../reports/content-jumpstart-backend-2026-07-12
+```
+
+This writes `report.md` / `report.json` / `issues.json` (+ `screenshots/`) into that folder, so reports persist and accumulate per site/date instead of living in a temp dir. If a run for the same site+date already exists, append a short suffix (`-2`, `-am`) rather than overwriting a prior report.
+
+`results.json` shape:
+
+```jsonc
+{
+  "metadata": {"run_id": "...", "target_url": "...", "engine": "chromium", "actions_total": 6, "actions_capped": false},
+  "evidence": [ /* the act bundles, optional */ ],
+  "issues": [{
+    "id": "issue-001", "title": "...", "severity": "critical|high|medium|low",
+    "category": "functional|console|network|navigation|content",
+    "source": "deterministic|ai", "url": "...", "description": "...",
+    "gate": { /* the failing gate object, for deterministic issues */ },
+    "ai_verdict": {"verdict": "inappropriate", "confidence": "medium", "reasoning": "..."},
+    "screenshot": "screenshots/...png"  // relative to --output dir, so image links resolve inside the saved report folder
+  }]
+}
+```
+
+Then give the user an in-session summary: what was tested, issues found (deterministic vs advisory), and anything skipped (cap, destructive, or errored).
+
+## Security sweep — endpoint auth enforcement (thorough audits)
+
+On a thorough audit, in addition to the UI pass, verify the backend actually enforces authentication/authorization. This is the one HTTP-level check (not browser-driven):
+
+1. **Enumerate the API surface.** If the app exposes an OpenAPI spec (`/openapi.json`, `/docs`), pull every `(method, path)`. Otherwise collect the endpoints observed in the network logs during the UI pass.
+2. **Call each endpoint twice** — once with **no** `Authorization` header, once with a valid token — and compare status. Substitute dummy values for path params (`{id}` → a real id from an authenticated list call, or a throwaway).
+3. **Flag any endpoint that should be protected but returns 2xx (or runs to a 500) without a token** — especially state-mutating (`POST`/`PUT`/`PATCH`/`DELETE`) and anything exposing data or internals. Watch for **duplicate routes**: a protected action re-exposed under a second unauthenticated path (e.g. an authed `/api/cache/clear` twinned by an open `/api/health/cache/clear`). Give admin/user-management, database backup/restore, privacy delete/anonymize, credit adjust/grant, and profiling/health-internal endpoints the closest look — an unauthenticated hit there is critical.
+4. **Legitimately public** (do not flag): `login`/`register`/`refresh`, health *liveness/readiness* probes, static assets, stateless public calculators, and signature-gated webhooks. On a test instance you may confirm an exposure by actually invoking it; note exactly what you triggered.
+
+Report auth findings as `deterministic` issues with `category: "security"`.
+
+## Safety — destructive actions (mandatory)
+
+**Never fire an irreversible interaction autonomously** — payments, deletes, sending mail, account changes, or submitting a form the snapshot marks `destructive: true` (e.g. a newsletter/signup — it creates a real record).
+
+There is no engine allowlist; this judgment is yours. When you classify a candidate as destructive, **ask the user for explicit confirmation before running `act` on it** — the session's Claude Code permission settings are the backstop. Read-only/idempotent actions (navigation, reading state) run freely.
+
+## Notes & current limitations
+
+- **New-tab/external links** are captured: `act` follows `target="_blank"` popups and reports the opened page's status; a ≥400 fails `opened_pages_ok`. This is how broken external links are caught.
+- The engine is **stateless per action** — it has no notion of a run. Orchestration, the 15-action cap, and ranking are your responsibility (this file), not engine flags.
+- One `act` = one fresh browser navigating to `--url` then performing the action. To test a deep flow, drive to the entry URL and perform the single decisive action; multi-step stateful flows (login → wizard → submit) are **not yet supported in one call**. A stateful `flow` subcommand — an ordered action list run in one persistent browser context, one evidence bundle + gate per step, validating each step before the next (§3a) — is the planned fix; until it ships, drive such flows with your own browser context.
