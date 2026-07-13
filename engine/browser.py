@@ -181,29 +181,27 @@ _SNAPSHOT_JS = r"""
     }
   }
 
-  // Incomplete / not-built markers a human tester would notice. CHEAP pre-check
-  // first — one innerText on body — so pages with no markers (the common case)
-  // skip the element scan entirely and large DOMs can't turn explore into a
-  // full-page crawl. When markers exist, scan only high-signal nodes (no bare
-  // div/p) with hard caps on nodes visited and results collected.
+  // Incomplete / not-built markers a human tester would notice. Extracted from
+  // the page's visible text in ONE pass — a single body.innerText (which already
+  // covers ALL visible elements incl. div/p, so nothing is missed by markup) then
+  // a cheap line scan. No per-element walk: fast on huge DOMs AND complete.
   const INCOMPLETE_RE = /(coming soon|under construction|not implemented|work in progress|placeholder|lorem ipsum|to be added|\btbd\b|\bwip\b)/i;
   const incomplete = [];
   const bodyText = document.body ? document.body.innerText : '';
   if (INCOMPLETE_RE.test(bodyText)) {
+    const lines = bodyText.split('\n').map((s) => s.trim()).filter(Boolean);
     const seenInc = new Set();
-    let scanned = 0;
-    const nodes = document.querySelectorAll(
-      'button, a, span, li, h1, h2, h3, h4, h5, [class*=badge], [class*=tag], [class*=status], [class*=chip], [class*=card]');
-    for (const el of nodes) {
-      if (++scanned > 600 || incomplete.length >= 25) break;
-      if (el.children.length > 4 || !visible(el)) continue;  // leaf-ish only
-      const t = (el.innerText || el.textContent || '').trim().replace(/\s+/g, ' ');
-      if (!t || t.length > 120) continue;
-      const m = t.match(INCOMPLETE_RE);
-      if (m) {
-        const label = t.slice(0, 90);
-        if (!seenInc.has(label)) { seenInc.add(label); incomplete.push({ marker: m[0].toLowerCase(), label }); }
+    for (let i = 0; i < lines.length && incomplete.length < 30; i++) {
+      const m = lines[i].match(INCOMPLETE_RE);
+      if (!m) continue;
+      // Label = the marker line; if that's just the bare marker, prepend the
+      // previous line (usually the feature name, e.g. "Voice Analysis").
+      let label = lines[i];
+      if (label.length < 25 && i > 0 && !INCOMPLETE_RE.test(lines[i - 1])) {
+        label = lines[i - 1] + ' — ' + label;
       }
+      label = label.slice(0, 90);
+      if (!seenInc.has(label)) { seenInc.add(label); incomplete.push({ marker: m[0].toLowerCase(), label }); }
     }
   }
 
