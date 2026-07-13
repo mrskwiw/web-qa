@@ -40,7 +40,9 @@ All engine commands are `python -m engine.cli …` run from here. Output is JSON
 python -m engine.cli explore --url <URL>
 ```
 
-Returns a `PageSnapshot`: `interactive` (elements ranked by importance, `rank` 0=primary CTA), `forms` (with `destructive` flag + `submit` selector), `links` (with `external`/`new_tab`/`scheme` flags), and initial `console`.
+Returns a `PageSnapshot`: `interactive` (elements ranked by importance, `rank` 0=primary CTA), `forms` (with `destructive` flag + `submit` selector), `links` (with `external`/`new_tab`/`scheme` flags + a **`dead`** flag for `#`/empty/`javascript:` links that go nowhere), **`incomplete`** (visible not-built markers — "Coming Soon", "under construction", placeholder — each with its `label`), and initial `console`.
+
+**Report incompleteness and dead links — a human tester would.** Every `incomplete` marker is a feature the app advertises but hasn't built; list them (usually *low* severity — disclosed-incomplete, not broken — but flag it if a *primary* CTA or a paid/credit-gated feature is Coming Soon). Every `dead: true` link is a control that looks clickable but goes nowhere — report it. For links with a real `href`, breakage is caught when you `act` on them (`opened_pages_ok` for new-tab/external ≥400; `http_status_ok`/`no_error_page` for same-tab); on an SPA that routes via buttons rather than `<a>`, verify nav by driving the buttons in a `flow`.
 
 ### 1. Infer expectations (you, in-context)
 

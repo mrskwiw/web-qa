@@ -273,6 +273,15 @@ class LinkInfo(Serializable):
     scheme: str = "relative"  # http | https | mailto | tel | relative | unknown
     external: bool = False
     new_tab: bool = False  # target="_blank"
+    dead: bool = False  # href is "#", empty, or javascript: — a link that goes nowhere
+
+
+@dataclass
+class IncompleteFeature(Serializable):
+    """A visible not-built marker (Coming Soon / under construction / placeholder)."""
+
+    marker: str  # the phrase matched, e.g. "coming soon"
+    label: str  # short surrounding text (the feature it applies to)
 
 
 @dataclass
@@ -284,6 +293,7 @@ class PageSnapshot(Serializable):
     interactive: List[InteractiveElement] = field(default_factory=list)
     forms: List[FormInfo] = field(default_factory=list)
     links: List[LinkInfo] = field(default_factory=list)
+    incomplete: List[IncompleteFeature] = field(default_factory=list)
     console: ConsoleDelta = field(default_factory=ConsoleDelta)
 
 

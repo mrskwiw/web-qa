@@ -21,6 +21,7 @@ from .models import (
     ConsoleMessage,
     FormField,
     FormInfo,
+    IncompleteFeature,
     InteractiveElement,
     LinkInfo,
     NetworkCall,
@@ -165,14 +166,33 @@ _SNAPSHOT_JS = r"""
     const key = role + '|' + text + '|' + s;
     if (!seen.has(key)) { seen.add(key); interactive.push({ selector: s, role, text, rank, kind }); }
     if (tag === 'A') {
-      const href = el.getAttribute('href') || '';
+      const rawHref = el.getAttribute('href');
+      const href = rawHref || '';
       let scheme = 'relative', external = false;
       try {
         const u = new URL(href, location.href);
         scheme = u.protocol.replace(':', '');
         external = (u.host !== originHost) && (scheme === 'http' || scheme === 'https');
       } catch (e) { scheme = href ? 'unknown' : 'relative'; }
-      links.push({ selector: s, text, href, target: el.getAttribute('target'), external, scheme });
+      // A link that goes nowhere: no href, '#', or a javascript: sink.
+      const dead = (rawHref === null) || href === '' || href === '#'
+        || /^javascript:/i.test(href);
+      links.push({ selector: s, text, href, target: el.getAttribute('target'), external, scheme, dead });
+    }
+  }
+
+  // Incomplete / not-built markers a human tester would notice.
+  const INCOMPLETE_RE = /(coming soon|under construction|not implemented|work in progress|placeholder|lorem ipsum|to be added|\btbd\b|\bwip\b)/i;
+  const incomplete = [];
+  const seenInc = new Set();
+  for (const el of document.querySelectorAll('button, a, h1, h2, h3, h4, h5, li, span, p, div, [class*=card], [class*=badge], [class*=tag]')) {
+    if (el.children.length > 4 || !visible(el)) continue;  // leaf-ish only
+    const t = (el.innerText || el.textContent || '').trim().replace(/\s+/g, ' ');
+    if (!t || t.length > 120) continue;
+    const m = t.match(INCOMPLETE_RE);
+    if (m) {
+      const label = t.slice(0, 90);
+      if (!seenInc.has(label)) { seenInc.add(label); incomplete.push({ marker: m[0].toLowerCase(), label }); }
     }
   }
 
@@ -212,7 +232,7 @@ _SNAPSHOT_JS = r"""
   }
 
   interactive.sort((a, b) => a.rank - b.rank);
-  return { interactive, forms, links };
+  return { interactive, forms, links, incomplete };
 }
 """
 
@@ -460,8 +480,13 @@ class BrowserController:
                 scheme=lk["scheme"],
                 external=lk["external"],
                 new_tab=(lk["target"] == "_blank"),
+                dead=lk.get("dead", False),
             )
             for lk in raw["links"]
+        ]
+        incomplete = [
+            IncompleteFeature(marker=m["marker"], label=m["label"])
+            for m in raw.get("incomplete", [])
         ]
         return PageSnapshot(
             url=self._page.url,
@@ -469,6 +494,7 @@ class BrowserController:
             interactive=interactive,
             forms=forms,
             links=links,
+            incomplete=incomplete,
             console=self._console_delta(),
         )
 
