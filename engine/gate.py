@@ -129,28 +129,29 @@ class DeterministicGate:
 
     @staticmethod
     def _target_survived(b: EvidenceBundle) -> GateCheckResult:
-        # Softest check, deliberately lenient to avoid false short-circuits:
-        # only fails when an element was acted on, the page did NOT navigate,
-        # nothing meaningful was triggered, and the element is gone. A submit/run
-        # button that fires a WRITE and then disables/relabels/is replaced is
-        # normal — but an *idempotent* GET (e.g. an analytics beacon) is NOT a
-        # good reason for the target to vanish, so a read-only ping no longer
-        # excuses a disappearance.
+        # SOFTEST check — its design goal is to avoid false short-circuits, so it
+        # is deliberately lenient. It fails ONLY when an element was acted on, the
+        # page did not navigate, NOTHING was triggered (no request, no popup), and
+        # the element is gone. Any network activity — even a GET — excuses a
+        # disappearance: a submit/run button relabels after a POST, and a legit
+        # GET-driven SPA update can replace the clicked element too. A vanish that
+        # coincides only with an unrelated GET is a rare miss that outcome
+        # verification (the AI pass) catches anyway — the right trade-off for a
+        # check whose false positives would short-circuit that judgment.
+        # (Verb-based tightening was tried and reverted: it false-flagged normal
+        # GET-driven flows — see BUGS.md 2026-07-13.)
         if b.target_present is None:
             return GateCheckResult("target_survived", True, "n/a (no selector)")
         if b.url_after != b.url_before:
             return GateCheckResult("target_survived", True, "n/a (navigated)")
         if b.target_present:
             return GateCheckResult("target_survived", True)
-        wrote = any(c.method.upper() not in ("GET", "HEAD", "OPTIONS") for c in b.http)
-        if wrote or b.opened:
+        if b.http or b.opened:
             return GateCheckResult(
-                "target_survived",
-                True,
-                "n/a (action performed a write / opened a page)",
+                "target_survived", True, "n/a (action triggered network activity)"
             )
         return GateCheckResult(
             "target_survived",
             False,
-            "acted-on element vanished with no navigation and no write",
+            "acted-on element vanished with no navigation or network activity",
         )

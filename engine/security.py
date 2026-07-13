@@ -227,6 +227,9 @@ class SweepResult(Serializable):
     swept: int
     include_mutating: bool = False
     skipped_mutating: int = 0  # mutating endpoints not probed (safe default)
+    # Explicit so a safe (read-only) run with zero findings is never mistaken for
+    # "no auth issues" — a partial sweep did NOT clear unauthenticated writes.
+    coverage: str = "complete"
     flagged: List[Finding] = field(default_factory=list)
     duplicate_notes: List[str] = field(default_factory=list)
     errors: List[str] = field(default_factory=list)
@@ -328,11 +331,22 @@ def sweep(
 
     order = {"critical": 0, "high": 1, "medium": 2}
     findings.sort(key=lambda f: (order.get(f.severity, 9), f.path))
+    coverage = (
+        "complete (all verbs probed)"
+        if include_mutating or skipped == 0
+        else (
+            f"PARTIAL — {skipped} write endpoint(s) (POST/PUT/PATCH/DELETE) were NOT "
+            "probed. A clean result does NOT clear unauthenticated writes — those are "
+            "the highest-risk auth bypasses. Re-run with --include-mutating against a "
+            "test target you own to check them."
+        )
+    )
     return SweepResult(
         base_url=base_url,
         swept=len(endpoints),
         include_mutating=include_mutating,
         skipped_mutating=skipped,
+        coverage=coverage,
         flagged=findings,
         duplicate_notes=find_duplicate_exposures(findings),
         errors=errors,
