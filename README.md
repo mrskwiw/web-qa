@@ -40,13 +40,15 @@ python -m playwright install chromium
 
 ## Engine commands
 
-Invoked as a subprocess from `SKILL.md`, relative to the skill directory:
+Invoked as a subprocess from `SKILL.md`, from the skill directory (`skills/web-qa/`). The
+engine uses package-relative imports, so run it as a module (`python -m engine.cli …`), not as a
+loose script:
 
 ```bash
-python engine/cli.py explore --url <URL>              # page snapshot
-python engine/cli.py act --url <URL> --action <json>  # execute one action → evidence bundle + gate
-python engine/cli.py flow --url <URL> ...             # drive an end-to-end journey
-python engine/cli.py report                           # render results
+python -m engine.cli explore --url <URL>                       # page snapshot
+python -m engine.cli act --url <URL> --action <json>           # execute one action → evidence bundle + gate
+python -m engine.cli flow --url <URL> ...                      # drive an end-to-end journey
+python -m engine.cli report --input results.json --output ./qa-results  # render results
 ```
 
 ## Tests
