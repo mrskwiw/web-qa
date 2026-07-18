@@ -60,7 +60,7 @@ Read the snapshot and, for each candidate interaction, decide **what a reasonabl
 python -m engine.cli act --url <URL> --action '{"type":"click","selector":"<sel>","inferred_intent":"<what you expect>"}' [--screenshot <path>]
 ```
 
-`type` ∈ `navigate|click|fill|type|press|scroll|wait_for`. Each call returns an **evidence bundle** with a `gate` result. Six **authoritative** checks decide `gate.passed`: `no_console_errors`, `http_status_ok`, `no_crash`, `no_error_page`, `navigation_sane`, `opened_pages_ok` (new-tab/external links). A seventh, `target_survived`, is **advisory** (`advisory: true`) — reported so you can weigh a vanished element, but it never fails the gate, because a disappearance is a semantic signal (often normal), not objective breakage.
+`type` ∈ `navigate|click|fill|type|press|scroll|wait_for|select` (`select` drives a native `<select>` dropdown — set `value` to the option's visible label, e.g. picking a client in a report generator; falls back to matching the option value). Each call returns an **evidence bundle** with a `gate` result. Six **authoritative** checks decide `gate.passed`: `no_console_errors`, `http_status_ok`, `no_crash`, `no_error_page`, `navigation_sane`, `opened_pages_ok` (new-tab/external links). A seventh, `target_survived`, is **advisory** (`advisory: true`) — reported so you can weigh a vanished element, but it never fails the gate, because a disappearance is a semantic signal (often normal), not objective breakage.
 
 **Gate-first short-circuit (cost control):**
 - If `gate.passed == false` → record a **deterministic** issue from the failing check(s) and **do NOT spend judgment on it** — the breakage is objective and authoritative. Move to the next interaction.
@@ -100,6 +100,18 @@ This cuts both ways as a false-positive guard: if a "Save" looks like a no-op, c
 For the deterministic layer, a `flow` step can assert `content_contains` / `content_absent` (e.g. result panel shows the entity, and does **not** say "No results"/"Error") — but those are only a coarse net. **Whether the produced content is genuinely good is your semantic judgment, and it is not optional for output-producing actions.**
 
 > Real example (2026-07-12, content-jumpstart): "Run research" returned `200` and deducted 200 credits — step "passed." Reading the produced client showed `keywords: []`, `competitors: []`, `results: total 0` — the tool billed for research and produced nothing. Only reading the artifact caught it.
+
+### 3c. Feature-completeness audit — determine & document what is NOT built (mandatory)
+
+**A real QA pass enumerates the app's incomplete and unimplemented features, not just the bugs in the built ones.** Users judge a product by the gap between what it advertises and what actually works, so produce an explicit inventory of every feature that is missing, stubbed, disabled, or broken. Gather it from *all* of these signals, not one:
+
+1. **Disclosed markers** — every `incomplete` entry from the explore snapshot plus any "Coming Soon", "Beta", "WIP", "Preview", "under construction", or roadmap/changelog copy in the UI. If the app has a features/roadmap/what's-new page, read it — it is the app's own list of what isn't done.
+2. **Disabled or dead controls** — greyed-out buttons, `disabled`/`aria-disabled` elements, `dead: true` links, menu items that no-op.
+3. **Undisclosed stubs (higher severity)** — a route or feature that *looks* live (in nav, not labeled Coming Soon) but renders an error/crash, an empty placeholder, "no data" with no way to get data, or a control whose handler is never wired. These are worse than a labeled Coming Soon because the app claims the feature exists.
+4. **Advertised-live vs. actual** — cross-check any in-app "what's included / working now" list against real behavior. **A feature the app lists as *live* that actually crashes or no-ops is a top finding** — the disclosure is false. (Conversely, a feature labeled Coming Soon that already works is a stale label — worth a low note.)
+5. **Paid/credit-gated incompleteness** — a Coming Soon or stub behind a CTA that still charges, navigates to a dead checkout, or occupies a primary action slot deserves elevated severity.
+
+Report a dedicated **"Incomplete / unimplemented features"** section that lists each item with: name, where it surfaces, how it's gated (disclosed Coming Soon vs. undisclosed stub vs. crash), and user impact. Separate *disclosed-incomplete* (usually low — honest) from *undisclosed/broken* (the real problems). This inventory is a required part of a full/thorough review, alongside the issue list.
 
 ### 4. Report
 
@@ -157,5 +169,7 @@ There is no engine allowlist; this judgment is yours. When you classify a candid
 ## Notes & current limitations
 
 - **New-tab/external links** are captured: `act` follows `target="_blank"` popups and reports the opened page's status; a ≥400 fails `opened_pages_ok`. This is how broken external links are caught.
-- The engine is **stateless per action** — it has no notion of a run. Orchestration, the 15-action cap, and ranking are your responsibility (this file), not engine flags.
-- One `act` = one fresh browser navigating to `--url` then performing the action. To test a deep flow, drive to the entry URL and perform the single decisive action; multi-step stateful flows (login → wizard → submit) are **not yet supported in one call**. A stateful `flow` subcommand — an ordered action list run in one persistent browser context, one evidence bundle + gate per step, validating each step before the next (§3a) — is the planned fix; until it ships, drive such flows with your own browser context.
+- `act` is **stateless per action** — one fresh browser navigating to `--url` then performing the single action; it has no notion of a run. Use it for isolated checks.
+- **For anything stateful (login → wizard → generate → export), use the `flow` subcommand** — an ordered step list run in one persistent browser context, one evidence bundle + gate + optional per-step `assert` each, halting at the first failed step (`--continue-on-fail` to override). Steps support `settle_ms` (extra idle wait — long async runs like an LLM generation can take minutes; size it to the work) and `await_response` (`{method, path_contains, timeout_ms}` — block until a specific response lands). Secrets are referenced by env var (`{"env":"VAR"}`), never inlined. This is the primary tool for real journeys (§3a).
+  - **Client-driven multi-step actions keep the browser busy.** If one click kicks off a client-side loop (e.g. "Generate Report" firing one `/run` per selected tool in sequence), the context must stay open until it finishes — size `settle_ms` to cover the *whole* batch, or the later iterations are aborted (and may still have been billed). When a batch is long, run the `flow` in the background and then poll the results view in a separate `flow`.
+- Orchestration, the 15-action cap, and ranking are your responsibility (this file), not engine flags.

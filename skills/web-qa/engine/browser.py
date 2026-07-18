@@ -358,6 +358,15 @@ class BrowserController:
             await self._page.mouse.wheel(0, distance)
         elif t is ActionType.WAIT_FOR:
             await self._page.wait_for_selector(_require(action.selector, "selector"))
+        elif t is ActionType.SELECT:
+            sel = _require(action.selector, "selector")
+            option = action.value if action.value is not None else (action.text or "")
+            # Author by the human-visible label first (how a QA step is written),
+            # falling back to the underlying option value if no label matches.
+            try:
+                await self._page.select_option(sel, label=option)
+            except Exception:  # noqa: BLE001  # nosec B110  -- retry by value
+                await self._page.select_option(sel, value=option)
         else:  # pragma: no cover — enum is exhaustive
             raise ValueError(f"Unsupported action type: {t}")
         await self._page.wait_for_timeout(300)

@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>web-qa flow fixture</title>
+  </head>
+  <body>
+    <main>
+      <h1>Flow Fixture</h1>
+      <form>
+        <input id="name" placeholder="Name" />
+        <button
+          type="button"
+          id="save"
+          onclick="document.getElementById('status').textContent = 'Saved!';"
+        >
+          Save
+        </button>
+        <button type="button" id="noop">No-op</button>
+        <div id="status">Not saved</div>
+      </form>
+      <select
+        id="fruit"
+        onchange="document.getElementById('status').textContent = 'Picked ' + this.value;"
+      >
+        <option value="">--</option>
+        <option value="apple">Apple</option>
+        <option value="banana">Banana</option>
+      </select>
+      <nav>
+        <a href="/dashboard">Dashboard</a>
+        <a href="#" id="deadlink">Settings</a>
+      </nav>
+      <section>
+        <h3>Voice Analysis</h3>
+        <span class="badge">Coming Soon</span>
+      </section>
+      <div><div><p>Reports dashboard — under construction.</p></div></div>
+    </main>
+  </body>
+</html>

@@ -56,6 +56,7 @@ class ActionType(str, Enum):
     PRESS = "press"
     SCROLL = "scroll"
     WAIT_FOR = "wait_for"
+    SELECT = "select"
 
 
 class Severity(str, Enum):
