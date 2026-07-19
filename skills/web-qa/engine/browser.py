@@ -148,13 +148,36 @@ _SNAPSHOT_JS = r"""
     return 'BODY';
   };
 
+  // Resolve a selector that addresses THIS element uniquely. A bare tag/class
+  // selector often matches many nodes (row-level Edit/Delete buttons, repeated
+  // links); Playwright would then click the wrong one — or strict-fail. Append a
+  // Playwright `>> nth=` disambiguator keyed to the element's DOM position. The
+  // match set per base selector is cached so this stays cheap on large DOMs.
+  const matchCache = new Map();
+  const uniqueSel = (el, base) => {
+    let arr = matchCache.get(base);
+    if (arr === undefined) {
+      try { arr = Array.prototype.slice.call(document.querySelectorAll(base)); }
+      catch (e) { arr = []; }  // invalid selector string (e.g. Tailwind `md:flex`)
+      matchCache.set(base, arr);
+    }
+    if (arr.length <= 1) return base;
+    const idx = arr.indexOf(el);
+    return idx >= 0 ? base + ' >> nth=' + idx : base;
+  };
+
   const interactive = [];
   const links = [];
-  const seen = new Set();
+  // Cap a run of identical controls (same role/text/base selector) so a 500-row
+  // table can't swamp the inventory, while still PRESERVING duplicates the old
+  // dedup collapsed — the agent needs to see & test each row's action surface.
+  const MAX_DUP = 12;
+  const sigCount = new Map();
   for (const el of document.querySelectorAll('a, button, input, select, textarea, [role=button], [onclick]')) {
     if (!visible(el)) continue;
     const tag = el.tagName;
-    const s = sel(el);
+    const base = sel(el);
+    const s = uniqueSel(el, base);
     const text = label(el);
     const role = el.getAttribute('role') || (tag === 'A' ? 'link' : tag === 'BUTTON' ? 'button' : tag.toLowerCase());
     const loc = landmark(el);
@@ -163,8 +186,9 @@ _SNAPSHOT_JS = r"""
     else if (loc === 'HEADER' || loc === 'NAV') { rank = 1; kind = 'nav'; }
     else if (loc === 'FORM') { rank = 2; kind = 'field'; }
     else if (loc === 'FOOTER') { rank = 3; kind = 'footer'; }
-    const key = role + '|' + text + '|' + s;
-    if (!seen.has(key)) { seen.add(key); interactive.push({ selector: s, role, text, rank, kind }); }
+    const sig = role + '|' + text + '|' + base;
+    const n = sigCount.get(sig) || 0;
+    if (n < MAX_DUP) { sigCount.set(sig, n + 1); interactive.push({ selector: s, role, text, rank, kind }); }
     if (tag === 'A') {
       const rawHref = el.getAttribute('href');
       const href = rawHref || '';
@@ -257,12 +281,17 @@ class BrowserController:
         viewport_height: int = 800,
         timeout_ms: int = 15000,
         slowmo_ms: int = 0,
+        nav_idle_ms: int = 3000,
     ) -> None:
         self._engine = engine
         self._headless = headless
         self._viewport = {"width": viewport_width, "height": viewport_height}
         self._timeout = timeout_ms
         self._slowmo = slowmo_ms
+        # Bounded, best-effort settle after a navigation reaches a load milestone.
+        # NOT a hard wait for networkidle (which never arrives on apps with
+        # polling/websockets/SSE/analytics and would hang the run).
+        self._nav_idle_ms = nav_idle_ms
 
         self._pw = None
         self._browser = None
@@ -332,7 +361,20 @@ class BrowserController:
     # -- actions -----------------------------------------------------------
 
     async def navigate(self, url: str) -> None:
-        await self._page.goto(url, wait_until="networkidle", timeout=self._timeout)
+        # Load to a guaranteed milestone; never block on networkidle, which never
+        # arrives on apps with persistent connections and would time out the run
+        # before the page is even captured.
+        await self._page.goto(url, wait_until="domcontentloaded", timeout=self._timeout)
+        # Opportunistic, bounded settle so first-paint XHRs land on well-behaved
+        # pages; a page that never idles simply proceeds after nav_idle_ms.
+        try:
+            await self._page.wait_for_load_state(
+                "networkidle", timeout=self._nav_idle_ms
+            )
+        except (
+            Exception
+        ):  # noqa: BLE001  # nosec B110 — persistent connections: proceed
+            pass
 
     async def perform(self, action: Action) -> None:
         """Dispatch a single action, then wait briefly for the page to settle."""

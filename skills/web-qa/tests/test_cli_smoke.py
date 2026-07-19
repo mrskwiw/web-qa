@@ -5,7 +5,11 @@ installed (``python -m playwright install chromium``), they skip rather than
 fail, so the pure test suite still runs anywhere.
 """
 
+import http.server
 import json
+import socketserver
+import threading
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
@@ -52,6 +56,16 @@ def test_explore_smoke(tmp_path):
     by_text = {lk["text"]: lk for lk in snap["links"]}
     assert by_text["Settings"]["dead"] is True
     assert by_text["Dashboard"]["dead"] is False
+    # duplicate controls are PRESERVED (not collapsed to one) AND each is uniquely
+    # addressable — the three identical row-level "Edit" buttons share a base
+    # selector, so each gets a Playwright `>> nth=` disambiguator.
+    edits = [e for e in snap["interactive"] if e["text"] == "Edit"]
+    assert len(edits) == 3, "repeated row controls must not be deduped away"
+    sels = [e["selector"] for e in edits]
+    assert len(set(sels)) == 3, "each duplicate must be uniquely addressable"
+    assert all(
+        "nth=" in s for s in sels
+    ), "non-unique selectors need an nth disambiguator"
 
 
 def test_flow_passes_and_validates_each_step(tmp_path):
@@ -114,6 +128,73 @@ def test_flow_select_option_by_label(tmp_path):
     assert data["metadata"]["steps_run"] == 1
     assert data["halted_at"] is None
     assert data["steps"][0]["passed"] is True
+
+
+def test_flow_clicks_disambiguated_duplicate(tmp_path):
+    # The three identical "Edit" buttons collapse to one base selector; the
+    # snapshot hands back `button.row-edit >> nth=N`. Clicking nth=1 must hit the
+    # SECOND row (Row B), proving the disambiguator addresses the right element
+    # rather than always firing the first match.
+    data = _run_flow(
+        tmp_path,
+        [
+            {
+                "type": "click",
+                "selector": "button.row-edit >> nth=1",
+                "label": "edit row B",
+                "assert": {"dom_contains": "Edit B"},
+            }
+        ],
+    )
+    assert data["halted_at"] is None
+    assert data["steps"][0]["passed"] is True
+
+
+@contextmanager
+def _busy_server():
+    """Serve a page whose script fires a repeating fetch, so the browser never
+    reaches networkidle — the persistent-connection case (polling/websockets/SSE)
+    that a ``networkidle`` navigation would hang on."""
+    html = (
+        b"<!doctype html><title>busy</title><h1>Busy</h1>"
+        b"<script>setInterval(function(){fetch('/ping').catch(function(){});},150);</script>"
+    )
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):  # noqa: N802 — stdlib callback name
+            body = b"pong" if self.path == "/ping" else html
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):  # silence per-request logging
+            pass
+
+    srv = socketserver.ThreadingTCPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        host, port = srv.server_address
+        yield f"http://{host}:{port}/"
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+
+def test_navigate_survives_never_idle_page():
+    # A page that never reaches networkidle must still be captured (bounded
+    # settle), not time out. Guards against regressing navigate() back to
+    # goto(wait_until="networkidle").
+    with _busy_server() as url:
+        res = CliRunner().invoke(cli, ["explore", "--url", url])
+    if res.exit_code != 0:
+        msg = str(res.exception or res.output)
+        if "Executable doesn't exist" in msg or "playwright install" in msg:
+            pytest.skip("Chromium not installed for Playwright")
+        raise AssertionError(msg)
+    snap = json.loads(res.output)
+    assert snap["title"] == "busy"
 
 
 def test_flow_missing_secret_errors(tmp_path):
