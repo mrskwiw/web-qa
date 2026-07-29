@@ -8,8 +8,9 @@ browser, perform one requested :class:`~engine.models.Action`, and capture a ful
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
-from typing import List, Optional
+from typing import Any, List, Optional
 
 from playwright.async_api import async_playwright
 
@@ -282,6 +283,8 @@ class BrowserController:
         timeout_ms: int = 15000,
         slowmo_ms: int = 0,
         nav_idle_ms: int = 3000,
+        storage_state: Optional[Any] = None,
+        user_agent: Optional[str] = None,
     ) -> None:
         self._engine = engine
         self._headless = headless
@@ -292,6 +295,14 @@ class BrowserController:
         # NOT a hard wait for networkidle (which never arrives on apps with
         # polling/websockets/SSE/analytics and would hang the run).
         self._nav_idle_ms = nav_idle_ms
+        # Persistent auth: a Playwright storage_state (cookies + localStorage) to seed
+        # the context with, and the user-agent to run under. Auth tokens are commonly
+        # bound to a device fingerprint (user-agent + IP), so the SAME user_agent must
+        # be used when a saved session is replayed or the server will reject the token.
+        # Establish once (login → save_session), then reuse across many explore/act/flow
+        # runs without re-authenticating — sidesteps auth rate limits and bot challenges.
+        self._storage_state = storage_state
+        self._user_agent = user_agent
 
         self._pw = None
         self._browser = None
@@ -315,10 +326,36 @@ class BrowserController:
         self._browser = await browser_type.launch(
             headless=self._headless, slow_mo=self._slowmo
         )
-        self._context = await self._browser.new_context(viewport=self._viewport)
+        ctx_kwargs: dict = {"viewport": self._viewport}
+        if self._user_agent:
+            ctx_kwargs["user_agent"] = self._user_agent
+        if self._storage_state is not None:
+            # Playwright accepts either a state dict or a path to a state file.
+            ctx_kwargs["storage_state"] = self._storage_state
+        self._context = await self._browser.new_context(**ctx_kwargs)
         self._page = await self._context.new_page()
         self._page.set_default_timeout(self._timeout)
         self._wire_listeners()
+
+    async def save_session(
+        self, path: str, user_agent: Optional[str] = None
+    ) -> str:
+        """Persist the live context's auth session (cookies + localStorage) plus the
+        user-agent to a session-bundle JSON, for replay by a later run via ``--session``.
+
+        Call this while the context is still open (e.g. at the end of a login flow),
+        NOT after ``close()``. The recorded user-agent matters: a fingerprint-bound
+        token is only valid when replayed under the same user-agent.
+        """
+        state = await self._context.storage_state()
+        bundle = {
+            "user_agent": user_agent or self._user_agent,
+            "storage_state": state,
+        }
+        target = Path(path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(json.dumps(bundle, indent=2), encoding="utf-8")
+        return str(target)
 
     async def close(self) -> None:
         if self._context is not None:

@@ -83,7 +83,27 @@ Emit a verdict: **`appropriate`** (no issue), **`inappropriate`** (→ AI issue 
 
 ### 3a. Multi-step & authenticated flows — validate every step
 
-Real apps hide most functionality behind login and multi-step journeys (wizards, checkout, create→edit→delete). To test these you must maintain browser state across actions, which the stateless `act` cannot do in one call — until a `flow` mode exists (see limitations), drive such flows with a single browser context you control.
+Real apps hide most functionality behind login and multi-step journeys (wizards, checkout, create→edit→delete). Use the `flow` subcommand to maintain browser state across steps in one persistent context.
+
+**Persistent auth session — log in ONCE, then reuse it (do this for any authenticated app).** Re-logging-in for every `explore`/`act`/`flow` run is the wrong pattern: it burns server-side auth **rate limits** (e.g. 5/15min), trips **bot-challenge** protection (Cloudflare/Vercel Attack-Challenge) on repeated fresh sessions, and can mis-fire on `SameSite=Strict` cookies. Instead, **establish the session once and replay it**:
+
+```bash
+# 1. Establish (ONE login) — run the login steps and SAVE the session (cookies + user-agent).
+#    Pin an explicit --user-agent: auth tokens are commonly bound to a UA+IP device
+#    fingerprint, so the SAME UA must be used to log in AND to replay, or the server
+#    rejects the token. Credentials come from env vars in the steps file, never inlined.
+python -m engine.cli flow --url <BASE>/login --steps login.json \
+  --user-agent "Mozilla/5.0 … QASession" --save-session .qa/session.json
+
+# 2. Reuse (NO re-login) — every subsequent run is already authenticated.
+python -m engine.cli explore --url <BASE>/dashboard --session .qa/session.json
+python -m engine.cli act     --url <BASE>/settings  --session .qa/session.json --action '{…}'
+python -m engine.cli flow    --url <BASE>/quiz/create --session .qa/session.json --steps build-quiz.json
+```
+
+The session bundle stores the Playwright `storage_state` (cookies + localStorage) and the UA. Verify a replay worked by confirming an authenticated page shows logged-in chrome (no "Login Required") and that its evidence has **no** `/api/auth/login` call. The token lives as long as the server allows (often 24h; refresh-token cookies extend it) — re-establish only when a replay starts showing logged-out. `login.json` is an ordinary steps file (fill email, fill password `{"env":"PASSWORD"}`, click submit, `await_response` the login endpoint).
+
+For the rare stateful case `flow` can't express, drive Playwright directly with a single context you control — but prefer the session-reuse pattern above.
 
 **Validate each step before executing the next. Never fire step N+1 assuming step N succeeded.** After every action, assert the expected state change actually happened — the write request fired and returned 2xx, the status/DOM updated, no error surfaced. If the assertion fails, **stop and record the failure at that step**; do not run later steps on top of it. Barrelling ahead produces two failures at once: you miss the real bug's location, and you generate garbage downstream evidence (later steps "fail" only because the state they needed was never created).
 
@@ -169,7 +189,8 @@ There is no engine allowlist; this judgment is yours. When you classify a candid
 ## Notes & current limitations
 
 - **New-tab/external links** are captured: `act` follows `target="_blank"` popups and reports the opened page's status; a ≥400 fails `opened_pages_ok`. This is how broken external links are caught.
-- `act` is **stateless per action** — one fresh browser navigating to `--url` then performing the single action; it has no notion of a run. Use it for isolated checks.
+- `act` is **stateless per action** — one fresh browser navigating to `--url` then performing the single action; it has no notion of a run. Use it for isolated checks. It (like `explore` and `flow`) accepts `--session <bundle>` to start already authenticated from a saved session (§3a).
+- **Auth session persistence (`--session` / `--save-session` / `--user-agent`):** `flow --save-session <file>` writes the context's cookies + user-agent after a login; `explore`/`act`/`flow --session <file>` seed a new context from it, so runs are authenticated without re-login. **Establish once, replay many** — the standard way to test an authenticated app without tripping auth rate limits or bot challenges. Pin the SAME `--user-agent` for login and every replay (tokens are UA+IP-fingerprint-bound). See §3a.
 - **For anything stateful (login → wizard → generate → export), use the `flow` subcommand** — an ordered step list run in one persistent browser context, one evidence bundle + gate + optional per-step `assert` each, halting at the first failed step (`--continue-on-fail` to override). Steps support `settle_ms` (extra idle wait — long async runs like an LLM generation can take minutes; size it to the work) and `await_response` (`{method, path_contains, timeout_ms}` — block until a specific response lands). Secrets are referenced by env var (`{"env":"VAR"}`), never inlined. This is the primary tool for real journeys (§3a).
   - **Client-driven multi-step actions keep the browser busy.** If one click kicks off a client-side loop (e.g. "Generate Report" firing one `/run` per selected tool in sequence), the context must stay open until it finishes — size `settle_ms` to cover the *whole* batch, or the later iterations are aborted (and may still have been billed). When a batch is long, run the `flow` in the background and then poll the results view in a separate `flow`.
 - Orchestration, the 15-action cap, and ranking are your responsibility (this file), not engine flags.

@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>dup hidden fixture</title>
+  </head>
+  <body>
+    <main>
+      <h1>Duplicates with a hidden clone</h1>
+      <div id="status">none</div>
+      <!-- A hidden clone sits FIRST in DOM order. It must not be inventoried,
+           and the visible rows' nth selectors must still target the right row —
+           i.e. nth is indexed against the full DOM set Playwright also uses. -->
+      <ul id="rows">
+        <li style="display: none">
+          <button type="button" class="row-edit"
+            onclick="document.getElementById('status').textContent = 'Edit HIDDEN';">Edit</button>
+        </li>
+        <li>Row A
+          <button type="button" class="row-edit"
+            onclick="document.getElementById('status').textContent = 'Edit A';">Edit</button></li>
+        <li>Row B
+          <button type="button" class="row-edit"
+            onclick="document.getElementById('status').textContent = 'Edit B';">Edit</button></li>
+        <li>Row C
+          <button type="button" class="row-edit"
+            onclick="document.getElementById('status').textContent = 'Edit C';">Edit</button></li>
+      </ul>
+    </main>
+  </body>
+</html>

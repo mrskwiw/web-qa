@@ -42,6 +42,41 @@ def _emit(payload: Dict[str, Any], output: str | None) -> None:
     click.echo(text)
 
 
+def _load_session(session: str | None) -> tuple[Any, str | None]:
+    """Load a saved auth session bundle → (storage_state, user_agent).
+
+    Returns ``(None, None)`` when no session path is given. The bundle is what
+    ``flow --save-session`` writes: ``{"user_agent": ..., "storage_state": {...}}``.
+    Reusing it seeds a context with the saved cookies so runs are authenticated
+    WITHOUT re-logging-in (avoiding auth rate limits + bot challenges), and pins
+    the user-agent the token's device fingerprint was bound to.
+    """
+    if not session:
+        return None, None
+    data = json.loads(Path(session).read_text(encoding="utf-8"))
+    return data.get("storage_state"), data.get("user_agent")
+
+
+def _controller(
+    engine: str,
+    headless: bool,
+    session: str | None = None,
+    user_agent: str | None = None,
+) -> BrowserController:
+    """Build a BrowserController, seeding a saved auth session when provided.
+
+    An explicit ``--user-agent`` overrides the one recorded in the session bundle
+    (use the same UA you logged in with, or leave it to inherit from the bundle).
+    """
+    storage_state, session_ua = _load_session(session)
+    return BrowserController(
+        engine=BrowserEngine(engine),
+        headless=headless,
+        storage_state=storage_state,
+        user_agent=user_agent or session_ua,
+    )
+
+
 @click.group()
 def cli() -> None:
     """web-qa deterministic engine."""
@@ -54,13 +89,31 @@ def cli() -> None:
 )
 @click.option("--headless/--no-headless", default=True)
 @click.option(
+    "--session",
+    type=click.Path(exists=True),
+    default=None,
+    help="Reuse a saved auth session (from `flow --save-session`) so this run is logged in.",
+)
+@click.option(
+    "--user-agent",
+    default=None,
+    help="Override the user-agent (defaults to the one saved in --session).",
+)
+@click.option(
     "--output", type=click.Path(), default=None, help="Also write snapshot JSON here."
 )
-def explore(url: str, engine: str, headless: bool, output: str | None) -> None:
+def explore(
+    url: str,
+    engine: str,
+    headless: bool,
+    session: str | None,
+    user_agent: str | None,
+    output: str | None,
+) -> None:
     """Navigate to URL and emit a structured, ranked page snapshot as JSON."""
 
     async def run():
-        controller = BrowserController(engine=BrowserEngine(engine), headless=headless)
+        controller = _controller(engine, headless, session, user_agent)
         await controller.launch()
         try:
             await controller.navigate(url)
@@ -88,6 +141,17 @@ def explore(url: str, engine: str, headless: bool, output: str | None) -> None:
     "--screenshot", type=click.Path(), default=None, help="Optional screenshot path."
 )
 @click.option(
+    "--session",
+    type=click.Path(exists=True),
+    default=None,
+    help="Reuse a saved auth session (from `flow --save-session`) so this run is logged in.",
+)
+@click.option(
+    "--user-agent",
+    default=None,
+    help="Override the user-agent (defaults to the one saved in --session).",
+)
+@click.option(
     "--output", type=click.Path(), default=None, help="Also write bundle JSON here."
 )
 def act(
@@ -96,6 +160,8 @@ def act(
     engine: str,
     headless: bool,
     screenshot: str | None,
+    session: str | None,
+    user_agent: str | None,
     output: str | None,
 ) -> None:
     """Execute one action and emit a gated evidence bundle."""
@@ -111,7 +177,7 @@ def act(
     )
 
     async def run():
-        controller = BrowserController(engine=BrowserEngine(engine), headless=headless)
+        controller = _controller(engine, headless, session, user_agent)
         await controller.launch()
         try:
             await controller.navigate(url)
@@ -167,6 +233,25 @@ def act(
     help="If set, capture a screenshot after every step into this dir.",
 )
 @click.option(
+    "--session",
+    type=click.Path(exists=True),
+    default=None,
+    help="Reuse a saved auth session so the flow starts already logged in.",
+)
+@click.option(
+    "--save-session",
+    type=click.Path(),
+    default=None,
+    help="After the flow completes, save the context's auth session (cookies + UA) here "
+    "for reuse via --session. Use this to run a login flow ONCE and replay it.",
+)
+@click.option(
+    "--user-agent",
+    default=None,
+    help="User-agent for the run. Pin the SAME UA for login (--save-session) and every "
+    "replay (--session), since auth tokens are bound to a UA+IP fingerprint.",
+)
+@click.option(
     "--output", type=click.Path(), default=None, help="Also write flow JSON here."
 )
 def flow(
@@ -176,6 +261,9 @@ def flow(
     headless: bool,
     continue_on_fail: bool,
     screenshot_dir: str | None,
+    session: str | None,
+    save_session: str | None,
+    user_agent: str | None,
     output: str | None,
 ) -> None:
     """Run an ordered list of steps in ONE browser context (stateful, spec §4.2).
@@ -191,10 +279,11 @@ def flow(
     env = os.environ
 
     async def run():
-        controller = BrowserController(engine=BrowserEngine(engine), headless=headless)
+        controller = _controller(engine, headless, session, user_agent)
         await controller.launch()
         results = []
         halted_at = None
+        session_saved = None
         try:
             await controller.navigate(url)
             for i, step in enumerate(steps):
@@ -259,6 +348,16 @@ def flow(
                         "reason": fail_reason(bundle.gate, assertion, perform_error),
                     }
                     break
+            # Persist the auth session (cookies + UA) while the context is still open,
+            # so a login flow can be run once and replayed via --session. Best-effort:
+            # a save failure must not sink the flow's results.
+            if save_session:
+                try:
+                    session_saved = await controller.save_session(
+                        save_session, user_agent=user_agent
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    session_saved = f"ERROR: {exc}"
         finally:
             await controller.close()
         return {
@@ -268,6 +367,7 @@ def flow(
                 "steps_total": len(steps),
                 "steps_run": len(results),
                 "halted": halted_at is not None,
+                "session_saved": session_saved,
             },
             "steps": results,
             "halted_at": halted_at,

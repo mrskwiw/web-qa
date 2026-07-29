@@ -17,14 +17,16 @@ from click.testing import CliRunner
 
 from engine.cli import cli
 
-FIXTURE = (Path(__file__).parent / "fixtures" / "form.html").resolve()
+_FIXTURES = Path(__file__).parent / "fixtures"
+FIXTURE = (_FIXTURES / "form.html").resolve()
+HIDDEN_DUP_FIXTURE = (_FIXTURES / "dup_hidden.html").resolve()
 
 
-def _run_flow(tmp_path, steps):
+def _run_flow(tmp_path, steps, url=None):
     steps_file = tmp_path / "steps.json"
     steps_file.write_text(json.dumps(steps), encoding="utf-8")
     res = CliRunner().invoke(
-        cli, ["flow", "--url", FIXTURE.as_uri(), "--steps", str(steps_file)]
+        cli, ["flow", "--url", url or FIXTURE.as_uri(), "--steps", str(steps_file)]
     )
     if res.exit_code != 0:
         msg = str(res.exception or res.output)
@@ -148,6 +150,40 @@ def test_flow_clicks_disambiguated_duplicate(tmp_path):
     )
     assert data["halted_at"] is None
     assert data["steps"][0]["passed"] is True
+
+
+def test_nth_disambiguator_skips_hidden_duplicate(tmp_path):
+    # A hidden clone sits FIRST in DOM order, before the three visible rows. The
+    # snapshot must (a) inventory only the 3 visible Edit buttons, and (b) emit
+    # nth selectors that each click their OWN visible row — proving nth is indexed
+    # against the same full DOM set Playwright resolves against (hidden node
+    # included), not the visible-only subset. Guards the review's high finding.
+    res = CliRunner().invoke(cli, ["explore", "--url", HIDDEN_DUP_FIXTURE.as_uri()])
+    if res.exit_code != 0:
+        msg = str(res.exception or res.output)
+        if "Executable doesn't exist" in msg or "playwright install" in msg:
+            pytest.skip("Chromium not installed for Playwright")
+        raise AssertionError(msg)
+    edits = [e for e in json.loads(res.output)["interactive"] if e["text"] == "Edit"]
+    assert len(edits) == 3, "hidden clone must be filtered out of the inventory"
+    # Each emitted selector must click its own visible row (A, B, C in DOM order),
+    # never the hidden clone or the wrong row.
+    for elem, want in zip(edits, ["Edit A", "Edit B", "Edit C"]):
+        data = _run_flow(
+            tmp_path,
+            [
+                {
+                    "type": "click",
+                    "selector": elem["selector"],
+                    "label": want,
+                    "assert": {"dom_contains": want},
+                }
+            ],
+            url=HIDDEN_DUP_FIXTURE.as_uri(),
+        )
+        assert (
+            data["steps"][0]["passed"] is True
+        ), f"{elem['selector']} should click {want}"
 
 
 @contextmanager
