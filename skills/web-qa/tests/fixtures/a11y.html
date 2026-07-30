@@ -27,9 +27,21 @@
   <button><span aria-hidden="true">&#9776;</span></button>
   <button aria-label="Close">&times;</button>
 
-  <!-- link-name: an anchor with an href but no text/aria-label. -->
+  <!-- link-name: an anchor with an href but no text/aria-label, plus an ARIA
+       link widget (role="link") with no name. The named ones must NOT fire. -->
   <a href="/settings"></a>
   <a href="/home">Home</a>
+  <span role="link" tabindex="0"></span>
+  <span role="link" tabindex="0">Docs</span>
+
+  <!-- button-name via button-like inputs: type=button with no value and
+       type=image with no alt both offend; submit (default label), a valued
+       button, and an alt'd image button must NOT fire. -->
+  <input type="button">
+  <input type="image" src="go.png">
+  <input type="submit">
+  <input type="button" value="OK">
+  <input type="image" src="go.png" alt="Search">
 
   <!-- positive-tabindex -->
   <input type="text" id="phone" aria-label="Phone" tabindex="3">

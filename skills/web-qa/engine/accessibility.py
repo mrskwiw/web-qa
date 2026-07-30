@@ -170,7 +170,7 @@ _A11Y_JS = r"""
   // 3. buttons without an accessible name (text counts, incl. emoji/icon glyphs).
   for (const el of document.querySelectorAll('button, [role="button"]')) {
     if (!visible(el) || ariaHidden(el)) continue;
-    if (el.tagName === 'INPUT') continue;  // input[type=submit] has an implicit name
+    if (el.tagName === 'INPUT') continue;  // button-like inputs handled below
     if (!hasName(el, true)) {
       // An <img> child with alt gives the button its name.
       const im = el.querySelector('img[alt]:not([alt=""]), svg title');
@@ -178,8 +178,23 @@ _A11Y_JS = r"""
     }
   }
 
-  // 4. links without an accessible name (must have an href to be a link).
-  for (const a of document.querySelectorAll('a[href]')) {
+  // 3b. button-like inputs. type=submit/reset carry a browser-default label
+  // ("Submit"/"Reset") so an empty one is still named — exempt them. type=button
+  // has NO default, and type=image is named by alt (falling back to value); a
+  // missing name on either is a real, common blocker.
+  for (const el of document.querySelectorAll('input[type="button"], input[type="image"]')) {
+    if (!visible(el) || ariaHidden(el)) continue;
+    const type = (el.getAttribute('type') || '').toLowerCase();
+    const val = (el.getAttribute('value') || '').trim();
+    const alt = (el.getAttribute('alt') || '').trim();
+    const named = !!val || (type === 'image' && !!alt) || hasName(el, false);
+    if (!named) push('button-name', el);
+  }
+
+  // 4. links without an accessible name. Covers real anchors AND ARIA link
+  // widgets (role="link" on a span/div, common in component libraries) — a
+  // compound selector returns each element once, so a<-role=link isn't double-scanned.
+  for (const a of document.querySelectorAll('a[href], [role="link"]')) {
     if (!visible(a) || ariaHidden(a)) continue;
     if (!hasName(a, true)) {
       const im = a.querySelector('img[alt]:not([alt=""]), svg title');

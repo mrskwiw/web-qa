@@ -90,12 +90,16 @@ def test_a11y_fixture_flags_each_rule():
     ):
         assert expected in rules, f"expected {expected} to be flagged; got {list(rules)}"
 
-    # and the NEGATIVE cases don't over-fire: exactly one img, one control, one
-    # button, one link offend (the labelled/decorative/named siblings are clean)
+    # and the NEGATIVE cases don't over-fire — the labelled / decorative / named
+    # / default-labelled siblings stay clean:
     assert rules["image-alt"]["count"] == 1  # alt="" decorative img not flagged
     assert rules["control-name"]["count"] == 1  # #email (labelled) not flagged
-    assert rules["button-name"]["count"] == 1  # aria-label button not flagged
-    assert rules["link-name"]["count"] == 1  # "Home" link not flagged
+    # button-name: icon <button> + input[type=button] (no value) + input[type=image]
+    # (no alt). The aria-label button, submit (default label), valued button, and
+    # alt'd image button are all clean.
+    assert rules["button-name"]["count"] == 3
+    # link-name: empty <a href> + empty role="link" span. "Home" and "Docs" clean.
+    assert rules["link-name"]["count"] == 2
 
     # impact + help are attached
     assert rules["image-alt"]["impact"] == "serious"
