@@ -185,8 +185,11 @@ _A11Y_JS = r"""
   for (const el of document.querySelectorAll('input[type="button"], input[type="image"]')) {
     if (!visible(el) || ariaHidden(el)) continue;
     const type = (el.getAttribute('type') || '').toLowerCase();
-    const val = (el.getAttribute('value') || '').trim();
-    const alt = (el.getAttribute('alt') || '').trim();
+    // Read the LIVE IDL properties (el.value / el.alt), not getAttribute — that
+    // is the source the accessible-name computation actually uses, and it always
+    // reflects a label set at runtime (e.g. a framework writing the property).
+    const val = (el.value || '').trim();
+    const alt = (el.alt || '').trim();
     const named = !!val || (type === 'image' && !!alt) || hasName(el, false);
     if (!named) push('button-name', el);
   }

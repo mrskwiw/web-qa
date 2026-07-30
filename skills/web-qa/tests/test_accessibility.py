@@ -95,8 +95,9 @@ def test_a11y_fixture_flags_each_rule():
     assert rules["image-alt"]["count"] == 1  # alt="" decorative img not flagged
     assert rules["control-name"]["count"] == 1  # #email (labelled) not flagged
     # button-name: icon <button> + input[type=button] (no value) + input[type=image]
-    # (no alt). The aria-label button, submit (default label), valued button, and
-    # alt'd image button are all clean.
+    # (no alt). The aria-label button, submit (default label), valued button,
+    # alt'd image button, and the button whose value is set at RUNTIME via the
+    # live .value property (#dynbtn) are all clean — count stays 3, not 4.
     assert rules["button-name"]["count"] == 3
     # link-name: empty <a href> + empty role="link" span. "Home" and "Docs" clean.
     assert rules["link-name"]["count"] == 2
