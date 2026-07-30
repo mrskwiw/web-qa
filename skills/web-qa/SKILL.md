@@ -1,6 +1,6 @@
 ---
 name: web-qa
-description: AI-assisted web-application QA — a replacement for human QA, not a technical checker. Enters the app as a real user with real goals and simulates end-to-end journeys in a headless browser: infers what each step should accomplish, captures evidence (DOM, console, network, screenshot), applies fast deterministic gates, then reads the produced output and judges whether the user's goal was actually achieved with good results — catching bugs that pass every objective check but are still wrong (silent no-ops, wrong/empty content, misleading state, broken links, billed actions that produce nothing). Use when asked to test, verify, or QA a web page or web app; check that a UI or user flow actually works; smoke-test a site; or find functional/UX bugs a linter cannot. Runs inside a Claude Code session; needs no API key.
+description: AI-assisted web-application QA — a replacement for human QA, not a technical checker. Enters the app as a real user with real goals and simulates end-to-end journeys in a headless browser: infers what each step should accomplish, captures evidence (DOM, console, network, screenshot), applies fast deterministic gates, then reads the produced output and judges whether the user's goal was actually achieved with good results — catching bugs that pass every objective check but are still wrong (silent no-ops, wrong/empty content, misleading state, broken links, billed actions that produce nothing). Also audits accessibility for assistive-tech users (screen-reader / keyboard-only / WCAG). Use when asked to test, verify, or QA a web page or web app; check that a UI or user flow actually works; smoke-test a site; check accessibility / a11y; or find functional/UX bugs a linter cannot. Runs inside a Claude Code session; needs no API key.
 ---
 
 # web-qa
@@ -13,6 +13,7 @@ description: AI-assisted web-application QA — a replacement for human QA, not 
 - **Cover the unhappy paths a human would hit.** Invalid input, empty states, partial completion, going back, re-entering, a slow/failed step and recovering. Real users don't follow the happy path; neither should you.
 - **The top-level question is always "did this achieve the user's actual goal, with good output?"** — not "did it return 200." That is why outcome verification (§3b) is mandatory: a human tester reads the result and judges it, and so do you.
 - **Report like a QA tester, not a linter.** Frame findings as "a user trying to X hits Y" with severity to the user's goal. The gates, security sweep, and console/network checks below are *instruments in service of this* — they catch the objective breakage so your judgment can focus on whether the experience works.
+- **A "real user" includes users with disabilities.** Some of the app's users reach it through a screen reader, by keyboard only, or at high zoom. A page that renders perfectly for a sighted mouse user can be unusable for them — an unlabeled control announces as just "edit text", an icon button as "button", an image as its file name. The accessibility audit (§3d) is how you test for that person, and it is part of a full QA pass, not an optional extra.
 
 Everything below is how to execute that mission rigorously.
 
@@ -40,7 +41,7 @@ All engine commands are `python -m engine.cli …` run from here. Output is JSON
 python -m engine.cli explore --url <URL>
 ```
 
-Returns a `PageSnapshot`: `interactive` (elements ranked by importance, `rank` 0=primary CTA), `forms` (with `destructive` flag + `submit` selector), `links` (with `external`/`new_tab`/`scheme` flags + a **`dead`** flag for `#`/empty/`javascript:` links that go nowhere), **`incomplete`** (visible not-built markers — "Coming Soon", "under construction", placeholder — each with its `label`), and initial `console`.
+Returns a `PageSnapshot`: `interactive` (elements ranked by importance, `rank` 0=primary CTA), `forms` (with `destructive` flag + `submit` selector), `links` (with `external`/`new_tab`/`scheme` flags + a **`dead`** flag for `#`/empty/`javascript:` links that go nowhere), **`incomplete`** (visible not-built markers — "Coming Soon", "under construction", placeholder — each with its `label`), initial `console`, and **`accessibility`** (the deterministic WCAG audit for this page — see §3d).
 
 **Report incompleteness and dead links — a human tester would.** Every `incomplete` marker is a feature the app advertises but hasn't built; list them (usually *low* severity — disclosed-incomplete, not broken — but flag it if a *primary* CTA or a paid/credit-gated feature is Coming Soon). Every `dead: true` link is a control that looks clickable but goes nowhere — report it. For links with a real `href`, breakage is caught when you `act` on them (`opened_pages_ok` for new-tab/external ≥400; `http_status_ok`/`no_error_page` for same-tab); on an SPA that routes via buttons rather than `<a>`, verify nav by driving the buttons in a `flow`.
 
@@ -133,6 +134,25 @@ For the deterministic layer, a `flow` step can assert `content_contains` / `cont
 
 Report a dedicated **"Incomplete / unimplemented features"** section that lists each item with: name, where it surfaces, how it's gated (disclosed Coming Soon vs. undisclosed stub vs. crash), and user impact. Separate *disclosed-incomplete* (usually low — honest) from *undisclosed/broken* (the real problems). This inventory is a required part of a full/thorough review, alongside the issue list.
 
+### 3d. Accessibility audit — can assistive-tech users actually use this? (mandatory for a full/thorough review)
+
+Test for the user who reaches the app through a screen reader, by keyboard only, or at high zoom. This has a **deterministic half** (objective WCAG facts, in the engine) and an **advisory half** (whether the experience is *coherent*, your judgment) — the same split as the rest of the skill.
+
+**Deterministic — run the audit (authoritative, objective).** Every `explore` snapshot already embeds an `accessibility` report; to audit a specific route (including behind auth), run:
+
+```bash
+python -m engine.cli a11y --url <URL> [--session .qa/session.json]
+```
+
+It returns `violations[]` — one aggregated entry per failed rule, each with `impact` (`critical`/`serious`/`moderate`/`minor`), a `help` string (the rule + the fix), a `count`, and example `nodes` (`selector` + `snippet`) — plus `counts` by impact. The rules are a curated, low-false-positive WCAG A/AA subset: `image-alt` (informative `<img>` with no alt), `control-name` (form field with no programmatic label — a placeholder does **not** count), `button-name` / `link-name` (control announces as just "button"/"link"), `html-has-lang`, `document-title`, `heading-order` (no `<h1>` or a skipped level), `positive-tabindex`, `duplicate-id`. These are facts (a missing `alt` *is* missing), so they are **deterministic** issues — emit each as `category: "accessibility"`, `source: "deterministic"`. Map impact → severity: `serious`/`critical` → **high** (it blocks the user — an unlabeled login field is unusable by a screen reader), `moderate` → **medium**, `minor` → **low**. Run the audit on each **distinct** page/state (landing, the authed core, a form-heavy view, any modal/wizard step), not just the entry URL — like the backend model, coverage is bounded by the states you visit.
+
+**Advisory — judge coherence (your semantic call, like §3/§3b).** The audit proves a name/attribute is *present or absent*; it can't tell you the experience makes sense. That is yours:
+
+- **Keyboard-only journey.** Re-drive a core journey using only keyboard actions (`press` Tab / Shift+Tab / Enter / Space / Escape). Can you reach and operate every control needed to finish the goal? Is a visible focus indicator present at each step? Does focus get **trapped** (a modal you can't Tab out of, or that never received focus on open), or **lost** (after a route change focus drops to `<body>` and a screen-reader user is stranded)? A journey that a mouse user completes but a keyboard user cannot is a **high**-severity finding.
+- **Screen-reader coherence.** Read the audit's accessible names and the snapshot's `dom_outline` (roles + landmarks + headings) as if heard top-to-bottom. Do the names actually *describe* their targets ("Delete invoice #42", not "🗑️"/"button")? Do landmarks and heading levels form a sensible outline to navigate by? A control that is technically *named* but whose name is useless is still a real finding — advisory, `source: "ai"`.
+
+**Report an "Accessibility" section** in the results: the deterministic violations grouped by impact (with counts and example selectors), then your keyboard/screen-reader findings. As always, deterministic violations are authoritative; never downgrade one because the page "looks fine" — it doesn't, to the user you're testing for. If you skipped the audit on some states (cap, time), say which.
+
 ### 4. Report
 
 Assemble a results object and render it. **Save every report under the repository-root `reports/` directory** (create it if missing), in a per-run folder named `<site-slug>-<YYYY-MM-DD>`:
@@ -189,6 +209,7 @@ There is no engine allowlist; this judgment is yours. When you classify a candid
 ## Notes & current limitations
 
 - **New-tab/external links** are captured: `act` follows `target="_blank"` popups and reports the opened page's status; a ≥400 fails `opened_pages_ok`. This is how broken external links are caught.
+- **Accessibility (`a11y` subcommand + `explore`'s `accessibility` field):** a deterministic WCAG A/AA subset (missing alt/label/name, no lang/title, heading-order, positive tabindex, duplicate id) — objective violations, so authoritative. It is a curated low-false-positive net, **not** a full axe-core scan, and it does **not** cover color-contrast, reflow/zoom, or motion; the keyboard-nav and screen-reader *coherence* judgment is the agent's, not the engine's (§3d).
 - `act` is **stateless per action** — one fresh browser navigating to `--url` then performing the single action; it has no notion of a run. Use it for isolated checks. It (like `explore` and `flow`) accepts `--session <bundle>` to start already authenticated from a saved session (§3a).
 - **Auth session persistence (`--session` / `--save-session` / `--user-agent`):** `flow --save-session <file>` writes the context's cookies + user-agent after a login; `explore`/`act`/`flow --session <file>` seed a new context from it, so runs are authenticated without re-login. **Establish once, replay many** — the standard way to test an authenticated app without tripping auth rate limits or bot challenges. Pin the SAME `--user-agent` for login and every replay (tokens are UA+IP-fingerprint-bound). See §3a.
 - **For anything stateful (login → wizard → generate → export), use the `flow` subcommand** — an ordered step list run in one persistent browser context, one evidence bundle + gate + optional per-step `assert` each, halting at the first failed step (`--continue-on-fail` to override). Steps support `settle_ms` (extra idle wait — long async runs like an LLM generation can take minutes; size it to the work) and `await_response` (`{method, path_contains, timeout_ms}` — block until a specific response lands). Secrets are referenced by env var (`{"env":"VAR"}`), never inlined. This is the primary tool for real journeys (§3a).

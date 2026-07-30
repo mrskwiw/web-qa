@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<!-- Intentionally inaccessible fixture: every block below trips exactly one rule
+     the audit checks. The <html> has NO lang attribute (html-has-lang) and the
+     document has NO <title> (document-title). -->
+<html>
+<head>
+  <meta charset="utf-8">
+</head>
+<body>
+  <!-- heading-order: first heading is <h3> (not h1), then a jump to <h5> -->
+  <h3>Welcome</h3>
+  <h5>Subsection</h5>
+
+  <!-- image-alt: informative image with no alt. The second img is decorative
+       (alt="") and must NOT be flagged. -->
+  <img src="chart.png">
+  <img src="spacer.gif" alt="">
+
+  <!-- control-name: a text input whose only "label" is a placeholder (not a
+       real accessible name). The labelled input below must NOT be flagged. -->
+  <input type="text" placeholder="Search">
+  <label for="email">Email</label>
+  <input type="text" id="email">
+
+  <!-- button-name: icon-only button with no text/aria-label. The named button
+       must NOT be flagged. -->
+  <button><span aria-hidden="true">&#9776;</span></button>
+  <button aria-label="Close">&times;</button>
+
+  <!-- link-name: an anchor with an href but no text/aria-label. -->
+  <a href="/settings"></a>
+  <a href="/home">Home</a>
+
+  <!-- positive-tabindex -->
+  <input type="text" id="phone" aria-label="Phone" tabindex="3">
+
+  <!-- duplicate-id: 'dup' appears twice -->
+  <div id="dup">one</div>
+  <div id="dup">two</div>
+</body>
+</html>

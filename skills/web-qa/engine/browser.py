@@ -14,9 +14,11 @@ from typing import Any, List, Optional
 
 from playwright.async_api import async_playwright
 
+from .accessibility import _A11Y_JS, parse_a11y
 from .models import (
     Action,
     ActionType,
+    A11yReport,
     BrowserEngine,
     ConsoleDelta,
     ConsoleMessage,
@@ -539,6 +541,16 @@ class BrowserController:
             warnings=[m.text for m in self._console if m.level in ("warning", "warn")],
         )
 
+    async def capture_a11y(self) -> A11yReport:
+        """Run the deterministic WCAG audit in the page context (spec §3d).
+
+        Objective accessibility violations only (missing alt/label/lang, bad
+        heading order, positive tabindex, duplicate id) — the semantic
+        keyboard/screen-reader judgment stays with the agent.
+        """
+        raw = await self._page.evaluate(_A11Y_JS)
+        return parse_a11y(raw, self._page.url)
+
     async def capture_snapshot(self) -> PageSnapshot:
         """Structured, ranked page inventory for the agent's intent inference."""
         raw = await self._page.evaluate(_SNAPSHOT_JS)
@@ -593,6 +605,7 @@ class BrowserController:
             links=links,
             incomplete=incomplete,
             console=self._console_delta(),
+            accessibility=await self.capture_a11y(),
         )
 
     async def capture_state(self) -> PageState:

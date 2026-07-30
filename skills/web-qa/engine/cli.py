@@ -377,6 +377,55 @@ def flow(
 
 
 @cli.command()
+@click.option("--url", required=True, help="Page to audit for accessibility.")
+@click.option(
+    "--browser", "engine", default=BrowserEngine.CHROMIUM.value, type=_ENGINE_CHOICE
+)
+@click.option("--headless/--no-headless", default=True)
+@click.option(
+    "--session",
+    type=click.Path(exists=True),
+    default=None,
+    help="Reuse a saved auth session so an authenticated route can be audited.",
+)
+@click.option(
+    "--user-agent",
+    default=None,
+    help="Override the user-agent (defaults to the one saved in --session).",
+)
+@click.option(
+    "--output", type=click.Path(), default=None, help="Also write a11y JSON here."
+)
+def a11y(
+    url: str,
+    engine: str,
+    headless: bool,
+    session: str | None,
+    user_agent: str | None,
+    output: str | None,
+) -> None:
+    """Deterministic accessibility (WCAG A/AA) audit of one page (spec §3d).
+
+    Emits objective violations only (missing alt/label/lang, empty title, bad
+    heading order, positive tabindex, duplicate id) — the keyboard-nav and
+    screen-reader *coherence* judgment is the agent's, per SKILL.md §3d. The same
+    report is also embedded in every ``explore`` snapshot under ``accessibility``.
+    """
+
+    async def run():
+        controller = _controller(engine, headless, session, user_agent)
+        await controller.launch()
+        try:
+            await controller.navigate(url)
+            return await controller.capture_a11y()
+        finally:
+            await controller.close()
+
+    report = asyncio.run(run())
+    _emit(report.to_dict(), output)
+
+
+@cli.command()
 @click.option("--url", required=True, help="Base URL of the target API/app.")
 @click.option(
     "--openapi",

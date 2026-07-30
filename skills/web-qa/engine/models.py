@@ -34,7 +34,7 @@ class Serializable:
     """Mixin giving dataclasses an enum-safe ``to_dict``."""
 
     def to_dict(self) -> Dict[str, Any]:
-        return _clean(asdict(self))  # type: ignore[arg-type]
+        return _clean(asdict(self))  # type: ignore[arg-type,call-overload]
 
 
 # ---------------------------------------------------------------------------
@@ -72,6 +72,23 @@ class IssueCategory(str, Enum):
     NETWORK = "network"
     NAVIGATION = "navigation"
     CONTENT = "content"
+    ACCESSIBILITY = "accessibility"
+    SECURITY = "security"
+
+
+class A11yImpact(str, Enum):
+    """axe-style impact ranking for an accessibility violation.
+
+    ``serious``/``critical`` block assistive-tech users outright (an unlabeled
+    control a screen reader can't announce); ``moderate``/``minor`` degrade the
+    experience without fully blocking it. The agent maps these to issue
+    ``Severity`` in SKILL.md (serious/critical → high/medium, etc.).
+    """
+
+    CRITICAL = "critical"
+    SERIOUS = "serious"
+    MODERATE = "moderate"
+    MINOR = "minor"
 
 
 class IssueSource(str, Enum):
@@ -285,6 +302,48 @@ class IncompleteFeature(Serializable):
     label: str  # short surrounding text (the feature it applies to)
 
 
+# ---------------------------------------------------------------------------
+# Accessibility audit (deterministic WCAG checks — objective, so engine-owned)
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class A11yNode(Serializable):
+    """One offending element for an accessibility rule."""
+
+    selector: str
+    snippet: str = ""  # truncated outerHTML, for the agent to locate the element
+
+
+@dataclass
+class A11yViolation(Serializable):
+    """A single failed WCAG rule, aggregated across all offending nodes.
+
+    Objective by construction (a missing ``alt`` attribute *is* missing), so this
+    is deterministic evidence — the agent maps it to a ``category:"accessibility"``
+    issue. ``help`` states the rule and the fix; ``nodes`` is capped for tokens.
+    """
+
+    rule: str  # e.g. "image-alt", "control-name", "html-has-lang"
+    impact: A11yImpact
+    help: str
+    count: int = 0
+    nodes: List[A11yNode] = field(default_factory=list)
+
+
+@dataclass
+class A11yReport(Serializable):
+    """The accessibility audit for one page — the deterministic half of the
+    blind/assistive-tech pass. Keyboard-nav and screen-reader *coherence* remain
+    the agent's advisory judgment (SKILL.md §3d)."""
+
+    url: str
+    violations: List[A11yViolation] = field(default_factory=list)
+    counts: Dict[str, int] = field(
+        default_factory=dict
+    )  # by impact: {critical,serious,moderate,minor,total}
+
+
 @dataclass
 class PageSnapshot(Serializable):
     """Structured page inventory the agent uses to infer expectations (spec §4 step 0)."""
@@ -296,6 +355,7 @@ class PageSnapshot(Serializable):
     links: List[LinkInfo] = field(default_factory=list)
     incomplete: List[IncompleteFeature] = field(default_factory=list)
     console: ConsoleDelta = field(default_factory=ConsoleDelta)
+    accessibility: Optional[A11yReport] = None
 
 
 # ---------------------------------------------------------------------------
