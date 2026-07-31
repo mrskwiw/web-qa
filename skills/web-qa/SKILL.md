@@ -31,7 +31,31 @@ Run from this skill directory (`.claude/skills/web-qa/`):
 pip install -r requirements.txt && python -m playwright install chromium
 ```
 
-All engine commands are `python -m engine.cli …` run from here. Output is JSON on stdout (add `--output <file>` to also save it).
+All engine commands are `python -m engine.cli …` run from here. Output is JSON on stdout (add `--output <file>` to also save it). Every subcommand is an **independent one-shot process** (one Chromium, no shared state except an optional read-only `--session` file), so the natural way to go fast is to run many of them **concurrently in separate subagents**.
+
+## Orchestration — parallelize across independent work (default)
+
+The numbered workflow below is the recipe for **one** unit of work. A real app has many independent units — several end-to-end journeys/personas, several routes to accessibility-audit, the security sweep. **Do not run them one after another. Fan them out across subagents and run them concurrently.** Sequential execution is the exception, reserved for a single-journey smoke check.
+
+**Serial spine (you, the main agent — do these once, in order, around the fan-out):**
+
+1. **Explore the entry surface** (§0) and enumerate the independent units: each end-to-end journey/persona, each distinct route needing an a11y audit (§3d), and (thorough audits) the security sweep.
+2. **Establish the auth session ONCE** (§3a) → `.qa/session.json`. This must precede fan-out and must not be parallelized: concurrent fresh logins are exactly the auth-rate-limit / bot-challenge anti-pattern §3a exists to avoid. Every subagent then **replays this one session read-only** via `--session .qa/session.json` — never `--save-session`.
+3. **Fan out** (below).
+4. **Merge & render** — collect the fragments, dedup, render the single report (§4), summarize.
+
+**Fan out — one subagent per independent unit:**
+
+- Spawn subagents with the **Agent tool, all in a single message** so they run concurrently. Cap at **~4–6 live at once** (each launches its own headless Chromium — memory-heavy); batch any remainder.
+- **Units that parallelize cleanly:** each journey/persona (its own `flow`), each distinct route's accessibility audit (§3d), the security sweep (§ Security). They share nothing but the read-only session file, and each writes to its own out-dir.
+- **Each subagent brief is self-contained.** Give it: (a) an instruction to **invoke the `web-qa` skill** first, so it inherits every rule here (gate-first short-circuit §2, outcome verification §3b, destructive-action safety); (b) its **assigned journey/persona plus the concrete inferred outcomes** you expect for it (§1) — do the inference on the main agent so slices don't overlap; (c) the target URL and the **read-only** `--session .qa/session.json` path; (d) its **own evidence out-dir and a unique screenshot filename prefix** (`<journey-slug>-…`) so parallel writes never collide; (e) the **return contract**: a **JSON results fragment** in the §4 issue shape (`{issues:[…], incomplete:[…], a11y:[…]}`, with evidence/screenshot paths), and explicit instructions to **NOT render a report** and to **NOT fire destructive actions** — flag any destructive candidate back to you instead.
+
+**Boundaries that stay serial (never parallelize these):**
+
+- **Within a journey, steps stay ordered.** §3a's validate-step-N-before-N+1 is unchanged — fan-out is *across* journeys, never *within* one. A single journey is one subagent's serial job.
+- **Session establishment** — one login, before fan-out (spine step 2).
+- **Destructive actions** — a subagent never fires them autonomously; it returns the candidate and *you* route it through the user's permission prompt (§ Safety).
+- **The final report** — merging fragments, deduping issues raised by more than one subagent (same title+url → one issue), assigning final `issue-NNN` ids, and rendering is one serial `report` pass by you (§4).
 
 ## Workflow
 
@@ -155,7 +179,7 @@ It returns `violations[]` — one aggregated entry per failed rule, each with `i
 
 ### 4. Report
 
-Assemble a results object and render it. **Save every report under the repository-root `reports/` directory** (create it if missing), in a per-run folder named `<site-slug>-<YYYY-MM-DD>`:
+Assemble a results object and render it. **When you fanned out (Orchestration §), this is the serial merge step:** union the subagents' fragments into one `issues[]`, dedup issues raised by more than one subagent (same title+url → one), renumber to contiguous `issue-NNN`, and render **once** — subagents never render their own report. **Save every report under the repository-root `reports/` directory** (create it if missing), in a per-run folder named `<site-slug>-<YYYY-MM-DD>`:
 
 - **`site-slug`** — the page `<title>` from the explore snapshot, slugified (lowercase, spaces/punctuation → `-`); fall back to the target hostname when the title is empty or generic. E.g. title "Operator Dashboard" on `content-jumpstart-backend.onrender.com` → prefer the hostname slug `content-jumpstart-backend`.
 - **`YYYY-MM-DD`** — today's date.
@@ -214,4 +238,4 @@ There is no engine allowlist; this judgment is yours. When you classify a candid
 - **Auth session persistence (`--session` / `--save-session` / `--user-agent`):** `flow --save-session <file>` writes the context's cookies + user-agent after a login; `explore`/`act`/`flow --session <file>` seed a new context from it, so runs are authenticated without re-login. **Establish once, replay many** — the standard way to test an authenticated app without tripping auth rate limits or bot challenges. Pin the SAME `--user-agent` for login and every replay (tokens are UA+IP-fingerprint-bound). See §3a.
 - **For anything stateful (login → wizard → generate → export), use the `flow` subcommand** — an ordered step list run in one persistent browser context, one evidence bundle + gate + optional per-step `assert` each, halting at the first failed step (`--continue-on-fail` to override). Steps support `settle_ms` (extra idle wait — long async runs like an LLM generation can take minutes; size it to the work) and `await_response` (`{method, path_contains, timeout_ms}` — block until a specific response lands). Secrets are referenced by env var (`{"env":"VAR"}`), never inlined. This is the primary tool for real journeys (§3a).
   - **Client-driven multi-step actions keep the browser busy.** If one click kicks off a client-side loop (e.g. "Generate Report" firing one `/run` per selected tool in sequence), the context must stay open until it finishes — size `settle_ms` to cover the *whole* batch, or the later iterations are aborted (and may still have been billed). When a batch is long, run the `flow` in the background and then poll the results view in a separate `flow`.
-- Orchestration, the 15-action cap, and ranking are your responsibility (this file), not engine flags.
+- Orchestration, the 15-action cap, ranking, and **fanning work out across concurrent subagents** (Orchestration §) are your responsibility (this file), not engine flags. The engine gives you independent one-shot processes; parallelism comes from running many of them at once in subagents, not from an engine flag.
