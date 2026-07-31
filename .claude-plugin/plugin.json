@@ -1,7 +1,7 @@
 {
   "name": "web-qa",
   "description": "AI-assisted web-application QA skill: enters a web app as a real user, drives a headless browser to simulate end-to-end journeys, captures evidence (DOM, console, network, screenshot), applies deterministic gates, and judges whether the user's goal was actually achieved \u2014 catching bugs that pass every objective check but are still wrong.",
-  "version": "2.4.3",
+  "version": "2.4.4",
   "author": {
     "name": "QA Tool Team"
   }
