@@ -48,7 +48,9 @@ PAGE = """<!doctype html>
 <div id="out">idle</div>
 <a id="newtab" href="/private" target="_blank">Open dashboard</a>
 <a id="broken" href="/missing" target="_blank">Open missing</a>
-<input id="name" name="name">
+<input id="name" name="name" onkeydown="if(event.key==='Enter'){
+  document.getElementById('out').textContent='ENTER-PRESSED:'+this.value;
+}">
 """.encode()
 
 
@@ -75,7 +77,13 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             )
         elif self.path == "/private":
             if SESSION_COOKIE in (self.headers.get("Cookie") or ""):
-                self._send(200, f"<title>dash</title><h1>{SECRET}</h1>".encode())
+                # Echo the received User-Agent so a replay can prove the session
+                # bundle's pinned UA was actually applied, not just its cookies.
+                ua = self.headers.get("User-Agent") or "?"
+                self._send(
+                    200,
+                    f"<title>dash</title><h1>{SECRET}</h1><p>UA:{ua}</p>".encode(),
+                )
             else:
                 self._send(401, b"<title>denied</title><h1>PLEASE-LOG-IN</h1>")
         elif self.path == "/slow-api":
@@ -197,13 +205,19 @@ def test_saved_session_authenticates_a_later_run(tmp_path):
                 ),
                 "--session",
                 str(sess),
-                "--user-agent",
-                "QA-UA/1.0",
+                # NO --user-agent here on purpose: the UA must be inherited from
+                # the bundle. Passing it would mask a regression in which
+                # save/load stopped persisting or applying user_agent, and UA is
+                # half of the fingerprint a bound token is validated against.
             ]
         )
         assert (
             replayed["steps"][0]["passed"] is True
         ), "replayed session was not authenticated"
+        assert "UA:QA-UA/1.0" in replayed["steps"][0]["bundle"]["content_after"], (
+            "the replayed run did not present the session bundle's pinned "
+            "user-agent — a UA+IP-fingerprint-bound token would be rejected"
+        )
 
         # 3. Control: without the session the SAME route is denied — so step 2
         #    passed because of the replayed cookie, not because /private is open.
@@ -405,6 +419,11 @@ def test_press_and_navigate_dispatch(tmp_path):
                             "selector": "#name",
                             "key": "Enter",
                             "label": "press",
+                            # The keypress must have an OBSERVABLE effect asserted
+                            # on the press step itself. Without this the branch
+                            # could be a no-op, or target the wrong element, and
+                            # the flow would still pass on the later steps.
+                            "assert": {"content_contains": "ENTER-PRESSED:Ada"},
                         },
                         {
                             "type": "navigate",
