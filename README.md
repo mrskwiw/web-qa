@@ -16,7 +16,7 @@ project/                       ← plugin root
 └── skills/
     └── web-qa/                ← the skill Claude Code loads
         ├── SKILL.md           ← agent instructions (the "AI" half)
-        ├── engine/            ← deterministic Python engine (explore/act/flow/report)
+        ├── engine/            ← deterministic Python engine (explore/act/flow/a11y/sweep/report)
         ├── requirements.txt
         └── tests/
 ```
@@ -29,8 +29,13 @@ contract.
 
 ## Install
 
-This directory is a self-contained Claude Code plugin. Point a marketplace or local plugin install
-at it, then set up the engine's Python dependencies:
+```
+/plugin marketplace add mrskwiw/mrskwiw-plugins
+/plugin install web-qa@mrskwiw-plugins
+```
+
+This directory is also a self-contained Claude Code plugin, so a local plugin install can point at
+it directly. Either way, set up the engine's Python dependencies once:
 
 ```bash
 cd skills/web-qa
@@ -45,11 +50,17 @@ engine uses package-relative imports, so run it as a module (`python -m engine.c
 loose script:
 
 ```bash
-python -m engine.cli explore --url <URL>                       # page snapshot
+python -m engine.cli explore --url <URL>                       # ranked page snapshot (+ accessibility report)
 python -m engine.cli act --url <URL> --action <json>           # execute one action → evidence bundle + gate
-python -m engine.cli flow --url <URL> ...                      # drive an end-to-end journey
+python -m engine.cli flow --url <URL> --steps <json>           # drive an end-to-end journey (stateful)
+python -m engine.cli a11y --url <URL>                          # WCAG A/AA accessibility audit
+python -m engine.cli sweep --url <BASE> --token-env <VAR>      # endpoint auth-enforcement sweep
 python -m engine.cli report --input results.json --output ./qa-results  # render results
 ```
+
+`sweep` is the one HTTP-level check (everything else drives the real UI). It is **safe by default**
+— read-only `GET` probes only; `--include-mutating` sends real writes that would execute on an
+unprotected endpoint, so use it only against a test target you own.
 
 ## Tests
 
