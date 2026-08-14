@@ -36,6 +36,48 @@ def _run_flow(tmp_path, steps, url=None):
     return json.loads(res.output)
 
 
+def test_act_emits_gated_bundle(tmp_path):
+    """The `act` subcommand drives one action and emits a §5 evidence bundle with a
+    computed gate — the primary 'agent's hands' command, previously untested."""
+    action = json.dumps({"type": "scroll", "inferred_intent": "scroll the page"})
+    res = CliRunner().invoke(cli, ["act", "--url", FIXTURE.as_uri(), "--action", action])
+    if res.exit_code != 0:
+        msg = str(res.exception or res.output)
+        if "Executable doesn't exist" in msg or "playwright install" in msg:
+            pytest.skip("Chromium not installed for Playwright")
+        raise AssertionError(msg)
+    bundle = json.loads(res.output)
+    # full bundle shape + a real gate verdict (a plain scroll is objectively clean)
+    assert bundle["action"]["type"] == "scroll"
+    assert {"url_before", "url_after", "gate", "http", "console"} <= set(bundle)
+    assert bundle["gate"]["passed"] is True
+    names = {c["name"] for c in bundle["gate"]["checks"]}
+    assert {"no_console_errors", "http_status_ok", "no_crash"} <= names
+
+
+def test_flow_save_session_round_trip(tmp_path):
+    """`flow --save-session` persists a replayable session bundle (cookies +
+    storage_state + pinned user-agent) — the establish-once-replay primitive
+    (browser.save_session), previously untested."""
+    steps_file = tmp_path / "steps.json"
+    steps_file.write_text(json.dumps([{"type": "scroll", "label": "scroll"}]), encoding="utf-8")
+    sess = tmp_path / "session.json"
+    res = CliRunner().invoke(cli, [
+        "flow", "--url", FIXTURE.as_uri(), "--steps", str(steps_file),
+        "--save-session", str(sess), "--user-agent", "QA-UA/1.0",
+    ])
+    if res.exit_code != 0:
+        msg = str(res.exception or res.output)
+        if "Executable doesn't exist" in msg or "playwright install" in msg:
+            pytest.skip("Chromium not installed for Playwright")
+        raise AssertionError(msg)
+    assert sess.exists()
+    bundle = json.loads(sess.read_text(encoding="utf-8"))
+    assert bundle["user_agent"] == "QA-UA/1.0"
+    assert "storage_state" in bundle  # cookies + localStorage container
+    assert json.loads(res.output)["metadata"]["session_saved"]
+
+
 def test_explore_smoke(tmp_path):
     res = CliRunner().invoke(cli, ["explore", "--url", FIXTURE.as_uri()])
     if res.exit_code != 0:
