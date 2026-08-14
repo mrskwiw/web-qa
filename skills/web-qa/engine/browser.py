@@ -12,7 +12,13 @@ import json
 from pathlib import Path
 from typing import Any, List, Optional
 
-from playwright.async_api import async_playwright
+from playwright.async_api import (
+    Browser,
+    BrowserContext,
+    Page,
+    Playwright,
+    async_playwright,
+)
 
 from .accessibility import _A11Y_JS, parse_a11y
 from .models import (
@@ -306,10 +312,10 @@ class BrowserController:
         self._storage_state = storage_state
         self._user_agent = user_agent
 
-        self._pw = None
-        self._browser = None
-        self._context = None
-        self._page = None
+        self._pw: Optional[Playwright] = None
+        self._browser: Optional[Browser] = None
+        self._context: Optional[BrowserContext] = None
+        self._page: Optional[Page] = None
 
         # Cumulative capture (deltas derived by the EvidenceBundler).
         self._console: List[ConsoleMessage] = []
@@ -319,6 +325,24 @@ class BrowserController:
         # New tabs / popups opened by an action (e.g. target="_blank" links).
         self._popup_pages: list = []
         self._popups: List[NetworkCall] = []
+
+
+    # Playwright handles are None until launch(). These accessors assert the
+    # launched invariant in one place, so the call sites below can use a
+    # non-Optional handle instead of each re-proving it. Using the controller
+    # before launch() is a programming error and now says so, instead of
+    # surfacing as an AttributeError on None several frames deeper.
+    @property
+    def page(self) -> Page:
+        if self._page is None:
+            raise RuntimeError("Controller is not launched - call launch() first.")
+        return self._page
+
+    @property
+    def context(self) -> BrowserContext:
+        if self._context is None:
+            raise RuntimeError("Controller is not launched - call launch() first.")
+        return self._context
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -335,8 +359,8 @@ class BrowserController:
             # Playwright accepts either a state dict or a path to a state file.
             ctx_kwargs["storage_state"] = self._storage_state
         self._context = await self._browser.new_context(**ctx_kwargs)
-        self._page = await self._context.new_page()
-        self._page.set_default_timeout(self._timeout)
+        self._page = await self.context.new_page()
+        self.page.set_default_timeout(self._timeout)
         self._wire_listeners()
 
     async def save_session(
@@ -349,7 +373,7 @@ class BrowserController:
         NOT after ``close()``. The recorded user-agent matters: a fingerprint-bound
         token is only valid when replayed under the same user-agent.
         """
-        state = await self._context.storage_state()
+        state = await self.context.storage_state()
         bundle = {
             "user_agent": user_agent or self._user_agent,
             "storage_state": state,
@@ -368,16 +392,16 @@ class BrowserController:
             await self._pw.stop()
 
     def _wire_listeners(self) -> None:
-        self._page.on(
+        self.page.on(
             "console",
             lambda msg: self._console.append(
                 ConsoleMessage(level=msg.type, text=msg.text)
             ),
         )
-        self._page.on("pageerror", lambda exc: self._page_errors.append(str(exc)))
-        self._page.on("response", self._on_response)
+        self.page.on("pageerror", lambda exc: self._page_errors.append(str(exc)))
+        self.page.on("response", self._on_response)
         # Attached after the main page exists, so it only fires for popups.
-        self._context.on("page", self._on_popup)
+        self.context.on("page", self._on_popup)
 
     def _on_response(self, response) -> None:
         try:
@@ -403,11 +427,11 @@ class BrowserController:
         # Load to a guaranteed milestone; never block on networkidle, which never
         # arrives on apps with persistent connections and would time out the run
         # before the page is even captured.
-        await self._page.goto(url, wait_until="domcontentloaded", timeout=self._timeout)
+        await self.page.goto(url, wait_until="domcontentloaded", timeout=self._timeout)
         # Opportunistic, bounded settle so first-paint XHRs land on well-behaved
         # pages; a page that never idles simply proceeds after nav_idle_ms.
         try:
-            await self._page.wait_for_load_state(
+            await self.page.wait_for_load_state(
                 "networkidle", timeout=self._nav_idle_ms
             )
         except (
@@ -421,41 +445,41 @@ class BrowserController:
         if t is ActionType.NAVIGATE:
             await self.navigate(_require(action.url, "url"))
         elif t is ActionType.CLICK:
-            await self._page.click(_require(action.selector, "selector"))
+            await self.page.click(_require(action.selector, "selector"))
         elif t is ActionType.FILL:
-            await self._page.fill(
+            await self.page.fill(
                 _require(action.selector, "selector"), action.value or ""
             )
         elif t is ActionType.TYPE:
-            await self._page.type(
+            await self.page.type(
                 _require(action.selector, "selector"), action.text or ""
             )
         elif t is ActionType.PRESS:
-            await self._page.press(
+            await self.page.press(
                 action.selector or "body", _require(action.key, "key")
             )
         elif t is ActionType.SCROLL:
             distance = int(action.value) if action.value else 500
-            await self._page.mouse.wheel(0, distance)
+            await self.page.mouse.wheel(0, distance)
         elif t is ActionType.WAIT_FOR:
-            await self._page.wait_for_selector(_require(action.selector, "selector"))
+            await self.page.wait_for_selector(_require(action.selector, "selector"))
         elif t is ActionType.SELECT:
             sel = _require(action.selector, "selector")
             option = action.value if action.value is not None else (action.text or "")
             # Author by the human-visible label first (how a QA step is written),
             # falling back to the underlying option value if no label matches.
             try:
-                await self._page.select_option(sel, label=option)
+                await self.page.select_option(sel, label=option)
             except Exception:  # noqa: BLE001  # nosec B110  -- retry by value
-                await self._page.select_option(sel, value=option)
+                await self.page.select_option(sel, value=option)
         else:  # pragma: no cover — enum is exhaustive
             raise ValueError(f"Unsupported action type: {t}")
-        await self._page.wait_for_timeout(300)
+        await self.page.wait_for_timeout(300)
 
     async def settle(self, ms: int) -> None:
         """Extra idle wait after an action — for slow SPA transitions/XHR to land
         before the after-state is captured (per-step ``settle_ms`` in a flow)."""
-        await self._page.wait_for_timeout(ms)
+        await self.page.wait_for_timeout(ms)
 
     def network_len(self) -> int:
         """Count of network calls captured so far (a mark for per-step deltas)."""
@@ -487,7 +511,7 @@ class BrowserController:
                     return True
             if waited >= timeout_ms:
                 return False
-            await self._page.wait_for_timeout(poll_ms)
+            await self.page.wait_for_timeout(poll_ms)
             waited += poll_ms
 
     async def settle_popups(self, timeout_ms: int = 5000) -> None:
@@ -509,7 +533,7 @@ class BrowserController:
             if not url.startswith(("http://", "https://")):
                 continue  # about:blank, mailto:, javascript: — nothing to fetch
             try:
-                resp = await self._context.request.get(url, timeout=timeout_ms)
+                resp = await self.context.request.get(url, timeout=timeout_ms)
                 self._popups.append(
                     NetworkCall(method="GET", url=resp.url, status=resp.status)
                 )
@@ -525,12 +549,12 @@ class BrowserController:
 
     async def is_present(self, selector: str) -> bool:
         """Whether a selector currently resolves to an element in the DOM."""
-        return await self._page.query_selector(selector) is not None
+        return await self.page.query_selector(selector) is not None
 
     async def screenshot(self, path: str) -> str:
         target = Path(path)
         target.parent.mkdir(parents=True, exist_ok=True)
-        await self._page.screenshot(path=str(target))
+        await self.page.screenshot(path=str(target))
         return str(target)
 
     # -- capture -----------------------------------------------------------
@@ -548,12 +572,12 @@ class BrowserController:
         heading order, positive tabindex, duplicate id) — the semantic
         keyboard/screen-reader judgment stays with the agent.
         """
-        raw = await self._page.evaluate(_A11Y_JS)
-        return parse_a11y(raw, self._page.url)
+        raw = await self.page.evaluate(_A11Y_JS)
+        return parse_a11y(raw, self.page.url)
 
     async def capture_snapshot(self) -> PageSnapshot:
         """Structured, ranked page inventory for the agent's intent inference."""
-        raw = await self._page.evaluate(_SNAPSHOT_JS)
+        raw = await self.page.evaluate(_SNAPSHOT_JS)
         interactive = [
             InteractiveElement(
                 selector=e["selector"],
@@ -598,8 +622,8 @@ class BrowserController:
             for m in raw.get("incomplete", [])
         ]
         return PageSnapshot(
-            url=self._page.url,
-            title=await self._page.title(),
+            url=self.page.url,
+            title=await self.page.title(),
             interactive=interactive,
             forms=forms,
             links=links,
@@ -609,19 +633,19 @@ class BrowserController:
         )
 
     async def capture_state(self) -> PageState:
-        cookies = await self._context.cookies()
+        cookies = await self.context.cookies()
         cookie_map = {c["name"]: str(c.get("value", "")) for c in cookies}
         return PageState(
-            url=self._page.url,
-            title=await self._page.title(),
-            ready_state=await self._page.evaluate("document.readyState"),
+            url=self.page.url,
+            title=await self.page.title(),
+            ready_state=await self.page.evaluate("document.readyState"),
             console=list(self._console),
             network=list(self._network),
             page_errors=list(self._page_errors),
-            focus=await self._page.evaluate(_FOCUS_JS),
+            focus=await self.page.evaluate(_FOCUS_JS),
             cookies=cookie_map,
-            dom_outline=await self._page.evaluate(_DOM_OUTLINE_JS),
-            content=await self._page.evaluate(_CONTENT_JS),
+            dom_outline=await self.page.evaluate(_DOM_OUTLINE_JS),
+            content=await self.page.evaluate(_CONTENT_JS),
         )
 
 
