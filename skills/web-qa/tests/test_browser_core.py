@@ -46,6 +46,9 @@ PAGE = """<!doctype html>
   document.getElementById('out').textContent = t;
 })">Run</button>
 <div id="out">idle</div>
+<button id="batch" onclick="
+  [400,1600,2800].forEach(function(d,i){setTimeout(function(){fetch('/api/b'+i);},d);});
+">Run batch</button>
 <a id="newtab" href="/private" target="_blank">Open dashboard</a>
 <a id="broken" href="/missing" target="_blank">Open missing</a>
 <input id="name" name="name" onkeydown="if(event.key==='Enter'){
@@ -89,6 +92,8 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         elif self.path == "/slow-api":
             time.sleep(SLOW_API_MS / 1000)
             self._send(200, b"slow-api-done")
+        elif self.path.startswith("/api/b"):
+            self._send(200, b"batch-ok")
         elif self.path == "/missing":
             self._send(404, b"<title>404</title><h1>Not Found</h1>")
         else:
@@ -326,6 +331,63 @@ def test_await_response_returns_false_on_timeout(tmp_path):
             ]
         )
         assert data["metadata"]["steps_run"] == 1  # proceeded rather than hanging
+
+
+def test_settle_window_captures_a_client_driven_xhr_batch(tmp_path):
+    """Every XHR a client-side batch fires during ``settle_ms`` lands in the step's
+    http delta — the response listener samples the WHOLE window, it does not stop
+    at the action.
+
+    This is the regression guard for BUGS.md C5, which was filed claiming late
+    XHRs "aren't captured in the step's http window" and that the fix required
+    re-architecting the listener. That diagnosis was wrong: capture already works
+    across the window (asserted below). The real constraint is that the window
+    must be declared up front — see the C5 entry for the corrected analysis.
+    """
+    with _server() as base:
+        covered = _invoke(
+            [
+                "flow",
+                "--url",
+                base,
+                "--steps",
+                _steps(
+                    tmp_path,
+                    [
+                        {
+                            "type": "click",
+                            "selector": "#batch",
+                            "label": "batch",
+                            "settle_ms": 5000,  # spans all three staggered fetches
+                        }
+                    ],
+                ),
+            ]
+        )
+        urls = [c["url"] for c in covered["steps"][0]["bundle"]["http"]]
+        for i in range(3):
+            assert any(
+                f"/api/b{i}" in u for u in urls
+            ), f"XHR /api/b{i} fired during the settle window but was not captured"
+
+        # Control: with no settle window the after-state is captured while the
+        # batch is still pending, so none of them are in the delta. This is the
+        # behaviour that made C5 look like a capture bug.
+        uncovered = _invoke(
+            [
+                "flow",
+                "--url",
+                base,
+                "--steps",
+                _steps(
+                    tmp_path,
+                    [{"type": "click", "selector": "#batch", "label": "batch"}],
+                    "nosettle.json",
+                ),
+            ]
+        )
+        plain = [c["url"] for c in uncovered["steps"][0]["bundle"]["http"]]
+        assert not any("/api/b" in u for u in plain)
 
 
 # -- popups / opened tabs (settle_popups) -----------------------------------
