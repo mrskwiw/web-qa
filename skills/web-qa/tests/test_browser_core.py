@@ -47,7 +47,7 @@ PAGE = """<!doctype html>
 })">Run</button>
 <div id="out">idle</div>
 <button id="batch" onclick="
-  [400,1600,2800].forEach(function(d,i){setTimeout(function(){fetch('/api/b'+i);},d);});
+  [1200,2600,4200].forEach(function(d,i){setTimeout(function(){fetch('/api/b'+i);},d);});
 ">Run batch</button>
 <a id="newtab" href="/private" target="_blank">Open dashboard</a>
 <a id="broken" href="/missing" target="_blank">Open missing</a>
@@ -343,6 +343,17 @@ def test_settle_window_captures_a_client_driven_xhr_batch(tmp_path):
     re-architecting the listener. That diagnosis was wrong: capture already works
     across the window (asserted below). The real constraint is that the window
     must be declared up front — see the C5 entry for the corrected analysis.
+
+    Two deliberate timing choices, both to stop this passing for the wrong reason:
+
+    * The batch starts at **+1200ms**, well clear of the unconditional 300ms
+      post-action wait in ``perform()``. An earlier first request would leave the
+      negative control with ~100ms of slack, so it would flap on a loaded host —
+      passing not because the window was absent but because the machine was slow.
+    * The last request fires at **+4200ms** against a 5000ms window, so the test
+      probes near the boundary. With every request bunched early, a regression
+      that truncated the settle to ~3s would still pass and the "whole window"
+      claim would be untested.
     """
     with _server() as base:
         covered = _invoke(
