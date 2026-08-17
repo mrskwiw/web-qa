@@ -632,7 +632,40 @@ class BrowserController:
             accessibility=await self.capture_a11y(),
         )
 
+    async def _settle_for_capture(self, timeout_ms: int = 10000) -> None:
+        """Let an in-flight navigation reach a milestone before reading the page.
+
+        An action that navigates — a link, a form post, an OAuth hand-off to an
+        external provider — can still be mid-flight when capture begins, and every
+        ``page.evaluate()`` then dies with "Execution context was destroyed".
+        Without this, `act` cannot capture ANY navigating interaction: it raises
+        instead of returning the evidence bundle that describes where it went.
+        """
+        try:
+            await self.page.wait_for_load_state(
+                "domcontentloaded", timeout=timeout_ms
+            )
+        except Exception:  # noqa: BLE001 — a page that never settles is not fatal
+            pass
+
     async def capture_state(self) -> PageState:
+        # Retry once: the navigation can commit *between* the settle and a later
+        # evaluate, destroying the context mid-capture. A second pass runs against
+        # the new document, which is the state the caller actually wants.
+        last: Exception | None = None
+        for _ in range(2):
+            await self._settle_for_capture()
+            try:
+                return await self._capture_state_once()
+            except Exception as exc:  # noqa: BLE001
+                if "Execution context was destroyed" not in str(exc):
+                    raise
+                last = exc
+        raise RuntimeError(
+            f"page kept navigating during capture, no stable document to read: {last}"
+        )
+
+    async def _capture_state_once(self) -> PageState:
         cookies = await self.context.cookies()
         cookie_map = {c["name"]: str(c.get("value", "")) for c in cookies}
         return PageState(
