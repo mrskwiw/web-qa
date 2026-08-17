@@ -92,6 +92,14 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         elif self.path == "/slow-api":
             time.sleep(SLOW_API_MS / 1000)
             self._send(200, b"slow-api-done")
+        elif self.path == "/redirector":
+            # Navigates itself immediately, so a capture started here races a
+            # live navigation — the condition that used to crash the engine.
+            self._send(
+                200,
+                b"<!doctype html><title>redirector</title>"
+                b"<script>location.replace('/private');</script><h1>going</h1>",
+            )
         elif self.path.startswith("/api/b"):
             self._send(200, b"batch-ok")
         elif self.path == "/missing":
@@ -511,3 +519,46 @@ def test_press_and_navigate_dispatch(tmp_path):
         assert data["metadata"]["steps_run"] == 3
         assert all(s["passed"] for s in data["steps"])
         assert data["steps"][2]["bundle"]["url_after"].endswith("/login")
+
+
+# -- capture across an in-flight navigation ---------------------------------
+
+
+def test_capture_is_internally_consistent_when_the_page_navigates(tmp_path):
+    """A snapshot must describe ONE document, never a mix of two.
+
+    The fixture's /redirector sends the browser to /private the moment it loads,
+    so capture races a live navigation. Two distinct failures are guarded here:
+
+    * the old crash ("Execution context was destroyed") — `act` used to exit
+      non-zero with no bundle at all, which made every OAuth/SSO/payment
+      hand-off untestable;
+    * the subtler torn read — url/title/content fetched in separate awaits could
+      come from different documents, producing a bundle that looks fine while
+      describing the wrong page, so the gate judges the wrong thing.
+
+    Asserting *consistency* rather than a specific destination is deliberate:
+    either document is a legitimate outcome depending on timing, but a snapshot
+    that claims one URL while carrying the other's content never is.
+    """
+    with _server() as base:
+        bundle = _invoke(
+            [
+                "act",
+                "--url",
+                f"{base}/redirector",
+                "--action",
+                json.dumps({"type": "scroll", "inferred_intent": "capture mid-nav"}),
+            ]
+        )
+
+    url, content = bundle["url_after"], bundle["content_after"]
+    if "/private" in url:
+        assert (
+            "PLEASE-LOG-IN" in content or SECRET in content
+        ), f"url says /private but content does not match it: {content[:120]!r}"
+    else:
+        assert (
+            "redirector" in url or "/private" not in content
+        ), f"snapshot mixes documents: url={url!r} content={content[:120]!r}"
+    assert bundle["gate"] is not None, "no gate computed — capture bailed out"

@@ -279,6 +279,19 @@ _SNAPSHOT_JS = r"""
 """
 
 
+# Every document-scoped field in a single atomic read (see _capture_state_once).
+_STATE_JS = (
+    "() => ({"
+    " url: location.href,"
+    " title: document.title,"
+    " readyState: document.readyState,"
+    " focus: (" + _FOCUS_JS + ")(),"
+    " outline: (" + _DOM_OUTLINE_JS + ")(),"
+    " content: (" + _CONTENT_JS + ")()"
+    "})"
+)
+
+
 class BrowserController:
     """Drive a single page and capture its observable state."""
 
@@ -326,7 +339,6 @@ class BrowserController:
         self._popup_pages: list = []
         self._popups: List[NetworkCall] = []
 
-
     # Playwright handles are None until launch(). These accessors assert the
     # launched invariant in one place, so the call sites below can use a
     # non-Optional handle instead of each re-proving it. Using the controller
@@ -363,9 +375,7 @@ class BrowserController:
         self.page.set_default_timeout(self._timeout)
         self._wire_listeners()
 
-    async def save_session(
-        self, path: str, user_agent: Optional[str] = None
-    ) -> str:
+    async def save_session(self, path: str, user_agent: Optional[str] = None) -> str:
         """Persist the live context's auth session (cookies + localStorage) plus the
         user-agent to a session-bundle JSON, for replay by a later run via ``--session``.
 
@@ -384,12 +394,26 @@ class BrowserController:
         return str(target)
 
     async def close(self) -> None:
-        if self._context is not None:
-            await self._context.close()
-        if self._browser is not None:
-            await self._browser.close()
-        if self._pw is not None:
-            await self._pw.stop()
+        """Tear down, tolerating a target that is already gone.
+
+        Teardown must never be able to fail a run. A page that was still
+        navigating (or a browser that died) makes these calls raise
+        "Target page, context or browser has been closed" — which propagates out
+        of the CLI's `finally`, turns a COMPLETED run into exit 1, and discards
+        every bundle it had already captured. The evidence is the product; losing
+        it to a cleanup error is the worst possible trade.
+        """
+        for shutdown in (
+            lambda: self._context.close() if self._context is not None else None,
+            lambda: self._browser.close() if self._browser is not None else None,
+            lambda: self._pw.stop() if self._pw is not None else None,
+        ):
+            try:
+                coro = shutdown()
+                if coro is not None:
+                    await coro
+            except Exception:  # noqa: BLE001 — already-closed targets are not errors
+                pass
 
     def _wire_listeners(self) -> None:
         self.page.on(
@@ -642,9 +666,7 @@ class BrowserController:
         instead of returning the evidence bundle that describes where it went.
         """
         try:
-            await self.page.wait_for_load_state(
-                "domcontentloaded", timeout=timeout_ms
-            )
+            await self.page.wait_for_load_state("domcontentloaded", timeout=timeout_ms)
         except Exception:  # noqa: BLE001 — a page that never settles is not fatal
             pass
 
@@ -666,19 +688,26 @@ class BrowserController:
         )
 
     async def _capture_state_once(self) -> PageState:
+        # ONE evaluate for every document-scoped field. Reading them in separate
+        # awaits let a navigation land between two of them, returning a PageState
+        # stitched from two different documents — a silently wrong evidence bundle,
+        # which is worse than the crash this replaced because the gate then judges
+        # the wrong page and reports success. A single evaluate is atomic: it
+        # either completes against one document or throws, and the caller retries.
         cookies = await self.context.cookies()
         cookie_map = {c["name"]: str(c.get("value", "")) for c in cookies}
+        snap = await self.page.evaluate(_STATE_JS)
         return PageState(
-            url=self.page.url,
-            title=await self.page.title(),
-            ready_state=await self.page.evaluate("document.readyState"),
+            url=snap["url"],
+            title=snap["title"],
+            ready_state=snap["readyState"],
             console=list(self._console),
             network=list(self._network),
             page_errors=list(self._page_errors),
-            focus=await self.page.evaluate(_FOCUS_JS),
+            focus=snap["focus"],
             cookies=cookie_map,
-            dom_outline=await self.page.evaluate(_DOM_OUTLINE_JS),
-            content=await self.page.evaluate(_CONTENT_JS),
+            dom_outline=snap["outline"],
+            content=snap["content"],
         )
 
 
