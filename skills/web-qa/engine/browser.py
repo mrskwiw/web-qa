@@ -279,6 +279,10 @@ _SNAPSHOT_JS = r"""
 """
 
 
+# Raised internally when the auth state moved while the document was being read.
+# Retried, never surfaced: a snapshot mixing two auth states is not evidence.
+_UNSTABLE_CAPTURE = "capture raced a cookie change"
+
 # Every document-scoped field in a single atomic read (see _capture_state_once).
 _STATE_JS = (
     "() => ({"
@@ -675,16 +679,21 @@ class BrowserController:
         # evaluate, destroying the context mid-capture. A second pass runs against
         # the new document, which is the state the caller actually wants.
         last: Exception | None = None
-        for _ in range(2):
+        for _ in range(3):
             await self._settle_for_capture()
             try:
                 return await self._capture_state_once()
             except Exception as exc:  # noqa: BLE001
-                if "Execution context was destroyed" not in str(exc):
+                text = str(exc)
+                retryable = (
+                    "Execution context was destroyed" in text
+                    or _UNSTABLE_CAPTURE in text
+                )
+                if not retryable:
                     raise
                 last = exc
         raise RuntimeError(
-            f"page kept navigating during capture, no stable document to read: {last}"
+            f"page kept changing during capture, no stable state to read: {last}"
         )
 
     async def _capture_state_once(self) -> PageState:
@@ -694,9 +703,21 @@ class BrowserController:
         # which is worse than the crash this replaced because the gate then judges
         # the wrong page and reports success. A single evaluate is atomic: it
         # either completes against one document or throws, and the caller retries.
-        cookies = await self.context.cookies()
-        cookie_map = {c["name"]: str(c.get("value", "")) for c in cookies}
+        # Cookies are part of the snapshot (cookies_delta is derived from them),
+        # so they must fall inside the same consistency boundary as the document.
+        # Reading them once beside the evaluate is not enough: a login or redirect
+        # that sets cookies mid-capture would pair OLD cookies with NEW page state.
+        # Bracket the atomic page read and demand the set is unchanged across it;
+        # if it moved, the whole capture is retried against a settled page.
+        before = {
+            c["name"]: str(c.get("value", "")) for c in await self.context.cookies()
+        }
         snap = await self.page.evaluate(_STATE_JS)
+        cookie_map = {
+            c["name"]: str(c.get("value", "")) for c in await self.context.cookies()
+        }
+        if before != cookie_map:
+            raise RuntimeError(_UNSTABLE_CAPTURE)
         return PageState(
             url=snap["url"],
             title=snap["title"],
