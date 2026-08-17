@@ -111,7 +111,15 @@ _FOCUS_JS = (
 _CONTENT_JS = r"""
 () => {
   const t = (document.body && document.body.innerText) ? document.body.innerText : '';
-  return t.replace(/[ \t]+/g, ' ').replace(/\n{3,}/g, '\n\n').trim().slice(0, 4000);
+  const clean = t.replace(/[ \t]+/g, ' ').replace(/\n{3,}/g, '\n\n').trim();
+  const LIMIT = 20000;
+  if (clean.length <= LIMIT) return clean;
+  // Truncation must ANNOUNCE itself. Silently returning a prefix makes a partial
+  // read indistinguishable from a whole page, so an agent judging "is this output
+  // complete?" reaches a confident verdict on evidence whose end it cannot see.
+  // Reporting the true length also tells it how much it is missing.
+  return clean.slice(0, LIMIT) +
+    '\n\n[content truncated: showing ' + LIMIT + ' of ' + clean.length + ' chars]';
 }
 """
 
@@ -310,7 +318,9 @@ class BrowserController:
         nav_idle_ms: int = 3000,
         storage_state: Optional[Any] = None,
         user_agent: Optional[str] = None,
+        block_assets: bool = False,
     ) -> None:
+        self._block_assets = block_assets
         self._engine = engine
         self._headless = headless
         self._viewport = {"width": viewport_width, "height": viewport_height}
