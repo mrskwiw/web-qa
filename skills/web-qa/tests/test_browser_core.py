@@ -610,7 +610,13 @@ def test_capture_state_retries_a_deterministically_torn_cookie_read():
     async def run():
         with _server() as base:
             controller = BrowserController(engine=BrowserEngine.CHROMIUM, headless=True)
-            await controller.launch()
+            try:
+                await controller.launch()
+            except Exception as exc:  # noqa: BLE001 — re-raised as a skip below
+                msg = str(exc)
+                if "Executable doesn't exist" in msg or "playwright install" in msg:
+                    pytest.skip("Chromium not installed for Playwright")
+                raise
             try:
                 await controller.navigate(f"{base}/torn-race")
                 real_evaluate = controller.page.evaluate
