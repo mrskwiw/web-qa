@@ -17,6 +17,7 @@ from click.testing import CliRunner
 
 from engine import security
 from engine.cli import cli
+from engine.security import load_openapi
 
 # OpenAPI surface the sweep enumerates. Mix of: an unauthenticated data exposure,
 # a correctly-protected endpoint, a genuinely-public one, and a sensitive mutating
@@ -38,10 +39,20 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         authed = self.headers.get("Authorization", "").startswith("Bearer ")
         if self.path.startswith("/api/clients/") and not authed:
             self.send_response(401)
+            self.end_headers()
+            self.wfile.write(b"{}")
+        elif self.path == "/openapi.json":
+            # Serves the real spec, not the generic {} every other path returns,
+            # so a test can assert load_openapi actually parsed THIS content.
+            body = json.dumps(_OPENAPI).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(body)
         else:
             self.send_response(200)
-        self.end_headers()
-        self.wfile.write(b"{}")
+            self.end_headers()
+            self.wfile.write(b"{}")
 
     def do_GET(self):  # noqa: N802 (http.server API)
         self._reply()
@@ -103,6 +114,15 @@ def test_probe_returns_both_statuses():
         no_tok, with_tok = security.probe(base, "GET", "/api/clients/", "valid-token")
     assert no_tok == 401
     assert with_tok == 200
+
+
+def test_load_openapi_fetches_from_a_url():
+    """The `https?://` branch (`security.py:273-277`) — only the local-file and
+    default-`<base>/openapi.json` branches had coverage before this. Asserts
+    real content came back over the wire, not just that no exception fired."""
+    with _server() as base:
+        spec = load_openapi(f"{base}/openapi.json", base)
+    assert spec == _OPENAPI
 
 
 def test_cli_sweep_command_end_to_end(tmp_path):

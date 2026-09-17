@@ -147,6 +147,24 @@ def test_http_any_matches_method_path_and_status():
     assert miss.passed is False
 
 
+def test_http_any_status_bounds_correctly_reject_a_call_outside_them():
+    """The FALSE branch of each status bound (`_match_call`, flow.py:105-110) —
+    prior coverage only exercised a call that satisfies each bound, never one
+    that doesn't. A call at 500 must fail `status_lt: 400` and `status_max: 499`,
+    and a call at 200 must fail `status_min: 300`."""
+    b = _bundle(http=[NetworkCall("POST", "https://e.com/api/clients/", 500)])
+
+    lt = evaluate_assertion(b, {"http_any": {"status_lt": 400}})
+    assert lt.passed is False
+
+    max_ = evaluate_assertion(b, {"http_any": {"status_max": 499}})
+    assert max_.passed is False
+
+    low = _bundle(http=[NetworkCall("GET", "https://e.com/api/credits/balance", 200)])
+    min_ = evaluate_assertion(low, {"http_any": {"status_min": 300}})
+    assert min_.passed is False
+
+
 def test_no_http_errors_and_no_console_errors():
     b = _bundle(
         http=[NetworkCall("POST", "https://e.com/api/x", 500)],

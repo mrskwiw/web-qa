@@ -39,6 +39,18 @@ SESSION_COOKIE = "sid=web-qa-test-session"
 SECRET = "SECRET-DASHBOARD-OK"
 SLOW_API_MS = 1200  # comfortably longer than perform()'s 300ms post-action settle
 
+# 50,000 elements measured locally at ~234ms for the first (cold) evaluate
+# against this page, vs. ~15-30ms for later ones — see WQ-T2 in
+# docs/COMPLETION_AND_OPTIMIZATION_PLAN.md for the measurement this is based on.
+TORN_RACE_PAGE = (
+    b"<!doctype html><title>torn-race</title>"
+    + b"".join(
+        f'<button class="c{i % 7}" data-x="{i}">Item {i}</button>'.encode()
+        for i in range(50000)
+    )
+    + b"<script>setTimeout(function(){document.cookie='race=flipped; path=/';}, 10);</script>"
+)
+
 PAGE = """<!doctype html>
 <title>core fixture</title>
 <h1>Core fixture</h1>
@@ -99,6 +111,20 @@ class _Handler(http.server.BaseHTTPRequestHandler):
                 200,
                 b"<!doctype html><title>redirector</title>"
                 b"<script>location.replace('/private');</script><h1>going</h1>",
+            )
+        elif self.path == "/torn-race":
+            # Deterministic (not incidental) trigger for capture_state()'s retry
+            # loop: a big enough DOM that the FIRST _capture_state_once() call is
+            # measurably slow (cold JIT/layout cost, ~234ms measured locally, vs.
+            # ~15-30ms on later calls against the same already-loaded page), and a
+            # ONE-TIME cookie flip fired 10ms after load — comfortably inside that
+            # window on attempt 1, and long finished by any retry. before != after
+            # on attempt 1 (RuntimeError(_UNSTABLE_CAPTURE), retried); the flip is
+            # one-shot, so attempt 2 sees a stable value and succeeds.
+            self._send(
+                200,
+                TORN_RACE_PAGE,
+                headers=[("Set-Cookie", "race=initial; Path=/")],
             )
         elif self.path.startswith("/api/b"):
             self._send(200, b"batch-ok")
@@ -562,3 +588,38 @@ def test_capture_is_internally_consistent_when_the_page_navigates(tmp_path):
             "redirector" in url or "/private" not in content
         ), f"snapshot mixes documents: url={url!r} content={content[:120]!r}"
     assert bundle["gate"] is not None, "no gate computed — capture bailed out"
+
+
+def test_capture_state_retries_a_deterministically_torn_cookie_read(tmp_path):
+    """`capture_state()`'s retry loop, forced every run rather than raced.
+
+    The sibling test above (`test_capture_is_internally_consistent_...`) proves
+    the OUTCOME is safe under a real, incidentally-timed race. This test proves
+    the RETRY MECHANISM ITSELF actually runs, every time: `/torn-race` is sized
+    so the first `_capture_state_once()` call is reliably slower (measured
+    ~234ms, cold) than the page's one-shot 10ms cookie flip, so attempt 1 must
+    see `before != after` cookies (`_UNSTABLE_CAPTURE`, browser.py:938-943) and
+    retry; the flip is one-shot, so attempt 2 sees a stable cookie and succeeds.
+
+    Verified by temporarily changing `capture_state`'s `for _ in range(3)` to
+    `range(1)`: with retry disabled this fixture makes `act` fail every time
+    with "page kept changing during capture, no stable state to read" — proving
+    this test actually depends on the retry loop, not merely tolerant of it.
+    """
+    with _server() as base:
+        bundle = _invoke(
+            [
+                "act",
+                "--url",
+                f"{base}/torn-race",
+                "--action",
+                json.dumps({"type": "scroll", "inferred_intent": "capture mid-flip"}),
+            ]
+        )
+    assert bundle["gate"] is not None, "no gate computed — capture bailed out"
+    assert "torn-race" in bundle["url_after"]
+    # The flip is one-shot: by the time `after` is captured (well past the 10ms
+    # timer), both before and after must see the settled, post-flip cookie.
+    assert bundle["cookies_delta"] == {}, (
+        f"cookie still in flux after capture settled: {bundle['cookies_delta']}"
+    )
