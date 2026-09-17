@@ -23,6 +23,7 @@ absent, matching `test_cli_smoke.py`.
 
 from __future__ import annotations
 
+import asyncio
 import http.server
 import json
 import threading
@@ -33,23 +34,15 @@ from pathlib import Path
 import pytest
 from click.testing import CliRunner
 
+from engine.browser import BrowserController
 from engine.cli import cli
+from engine.models import BrowserEngine
 
 SESSION_COOKIE = "sid=web-qa-test-session"
 SECRET = "SECRET-DASHBOARD-OK"
 SLOW_API_MS = 1200  # comfortably longer than perform()'s 300ms post-action settle
 
-# 50,000 elements measured locally at ~234ms for the first (cold) evaluate
-# against this page, vs. ~15-30ms for later ones — see WQ-T2 in
-# docs/COMPLETION_AND_OPTIMIZATION_PLAN.md for the measurement this is based on.
-TORN_RACE_PAGE = (
-    b"<!doctype html><title>torn-race</title>"
-    + b"".join(
-        f'<button class="c{i % 7}" data-x="{i}">Item {i}</button>'.encode()
-        for i in range(50000)
-    )
-    + b"<script>setTimeout(function(){document.cookie='race=flipped; path=/';}, 10);</script>"
-)
+TORN_RACE_PAGE = b"<!doctype html><title>torn-race</title><h1>torn-race</h1>"
 
 PAGE = """<!doctype html>
 <title>core fixture</title>
@@ -113,14 +106,9 @@ class _Handler(http.server.BaseHTTPRequestHandler):
                 b"<script>location.replace('/private');</script><h1>going</h1>",
             )
         elif self.path == "/torn-race":
-            # Deterministic (not incidental) trigger for capture_state()'s retry
-            # loop: a big enough DOM that the FIRST _capture_state_once() call is
-            # measurably slow (cold JIT/layout cost, ~234ms measured locally, vs.
-            # ~15-30ms on later calls against the same already-loaded page), and a
-            # ONE-TIME cookie flip fired 10ms after load — comfortably inside that
-            # window on attempt 1, and long finished by any retry. before != after
-            # on attempt 1 (RuntimeError(_UNSTABLE_CAPTURE), retried); the flip is
-            # one-shot, so attempt 2 sees a stable value and succeeds.
+            # Plain page — the cookie mutation that races capture_state()'s
+            # before/after read is injected deterministically from the TEST
+            # (patching page.evaluate), not from anything server- or page-side.
             self._send(
                 200,
                 TORN_RACE_PAGE,
@@ -590,36 +578,65 @@ def test_capture_is_internally_consistent_when_the_page_navigates(tmp_path):
     assert bundle["gate"] is not None, "no gate computed — capture bailed out"
 
 
-def test_capture_state_retries_a_deterministically_torn_cookie_read(tmp_path):
-    """`capture_state()`'s retry loop, forced every run rather than raced.
+def test_capture_state_retries_a_deterministically_torn_cookie_read():
+    """`capture_state()`'s retry loop, forced by a real synchronization point
+    every run — never raced against a timer.
 
     The sibling test above (`test_capture_is_internally_consistent_...`) proves
-    the OUTCOME is safe under a real, incidentally-timed race. This test proves
-    the RETRY MECHANISM ITSELF actually runs, every time: `/torn-race` is sized
-    so the first `_capture_state_once()` call is reliably slower (measured
-    ~234ms, cold) than the page's one-shot 10ms cookie flip, so attempt 1 must
-    see `before != after` cookies (`_UNSTABLE_CAPTURE`, browser.py:938-943) and
-    retry; the flip is one-shot, so attempt 2 sees a stable cookie and succeeds.
+    the OUTCOME is safe under a real, incidentally-timed race (a page that
+    redirects itself, timing left to chance). An EARLIER version of this test
+    tried to force the SAME race deterministically with a big-DOM page plus a
+    short JS timer sized from a local timing measurement — a real Codex review
+    (post-commit) correctly flagged that as still a wall-clock race dressed up
+    as determinism: right on this machine, not *guaranteed* anywhere `evaluate`
+    happens to be faster or the timer happens to fire late.
+
+    This version has no race at all. `navigate()` never calls `page.evaluate`
+    itself, so the patch is installed right after it, before `capture_state()`
+    runs — meaning `patched_evaluate`'s FIRST call is guaranteed to be attempt
+    1's own `_STATE_JS` evaluate. On that call it invokes `context.add_cookies()`
+    for real, in real Python code, strictly BETWEEN `_capture_state_once`'s
+    "before" `context.cookies()` read and its "after" one (browser.py:935-943)
+    — by construction, not by timing. The real Chromium, the real cookie jar
+    and the real `_STATE_JS` evaluate all still run; only the moment the
+    mutation happens is pinned exactly once.
 
     Verified by temporarily changing `capture_state`'s `for _ in range(3)` to
-    `range(1)`: with retry disabled this fixture makes `act` fail every time
-    with "page kept changing during capture, no stable state to read" — proving
-    this test actually depends on the retry loop, not merely tolerant of it.
+    `range(1)`: with retry disabled this raises "page kept changing during
+    capture, no stable state to read" every time — proving this test actually
+    depends on the retry loop, not merely tolerant of it.
     """
-    with _server() as base:
-        bundle = _invoke(
-            [
-                "act",
-                "--url",
-                f"{base}/torn-race",
-                "--action",
-                json.dumps({"type": "scroll", "inferred_intent": "capture mid-flip"}),
-            ]
-        )
-    assert bundle["gate"] is not None, "no gate computed — capture bailed out"
-    assert "torn-race" in bundle["url_after"]
-    # The flip is one-shot: by the time `after` is captured (well past the 10ms
-    # timer), both before and after must see the settled, post-flip cookie.
-    assert bundle["cookies_delta"] == {}, (
-        f"cookie still in flux after capture settled: {bundle['cookies_delta']}"
+
+    async def run():
+        with _server() as base:
+            controller = BrowserController(engine=BrowserEngine.CHROMIUM, headless=True)
+            await controller.launch()
+            try:
+                await controller.navigate(f"{base}/torn-race")
+                real_evaluate = controller.page.evaluate
+                calls = {"n": 0}
+
+                async def patched_evaluate(*args, **kwargs):
+                    calls["n"] += 1
+                    if calls["n"] == 1:
+                        # Fires strictly between capture_state's "before" and
+                        # "after" cookie reads (browser.py:935-943) — a real
+                        # mutation the retry loop must detect and recover from,
+                        # not a guess about when a timer might land.
+                        await controller.context.add_cookies(
+                            [{"name": "race", "value": "flipped", "url": base}]
+                        )
+                    return await real_evaluate(*args, **kwargs)
+
+                controller.page.evaluate = patched_evaluate
+                state = await controller.capture_state()
+                return calls["n"], state.cookies.get("race")
+            finally:
+                await controller.close()
+
+    evaluate_calls, final_cookie = asyncio.run(run())
+    assert evaluate_calls == 2, (
+        f"expected exactly one retry (2 evaluate calls), got {evaluate_calls} — "
+        "either the mismatch wasn't detected, or the loop retried more than once"
     )
+    assert final_cookie == "flipped", "capture_state did not settle on the post-mutation value"
