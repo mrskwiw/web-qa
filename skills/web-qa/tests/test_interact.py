@@ -172,3 +172,72 @@ def test_interact_click_requires_text_or_selector(tmp_path):
         assert "--text or --selector" in (r.stdout + r.stderr)
 
         _interact("stop", "--state", state)
+
+
+def test_interact_stop_refuses_to_kill_a_pid_that_does_not_match_the_profile_dir(tmp_path):
+    """Post-commit review (2026-09-18): a bare PID out of a JSON state file is
+    unsafe to trust blindly -- the real process can have already exited and
+    the PID been reused by something unrelated by the time `stop` runs, or the
+    file could be tampered. `stop` must verify the live process's own command
+    line actually references OUR profile dir before ever sending a kill.
+
+    Uses this TEST's own pid with a profile_dir guaranteed not to appear in
+    its command line -- if the guard were absent, `stop` would attempt to
+    kill the test runner itself (or crash trying)."""
+    from engine.interact import stop
+
+    state = tmp_path / "session.json"
+    bogus_profile = str(tmp_path / "wd-interact-not-actually-launched")
+    state.write_text(
+        json.dumps({
+            "schema": 1,
+            "pid": os.getpid(),
+            "port": 0,
+            "profile_dir": bogus_profile,
+            "entry_url": "http://example.invalid",
+        }),
+        encoding="utf-8",
+    )
+
+    result = stop(str(state))
+
+    assert result["stopped"] is True
+    assert result["pid"] == os.getpid()
+    assert not state.exists()  # the state handle is still cleaned up
+    # the real point of the test: we are still executing, so THIS process was
+    # not sent taskkill/SIGKILL despite the state file naming its own pid.
+
+
+def test_pick_page_refuses_to_guess_between_two_non_internal_pages():
+    """Post-commit review (2026-09-18): silently picking a page by position
+    (or any heuristic) after a click opens a popup/new tab risks a later
+    action reading or mutating a surface the caller never intended. Must fail
+    loudly and name the ambiguity instead of guessing.
+
+    A direct unit test against `_pick_page` rather than a real popup driven
+    through headless chromium: `window.open` timing in headless mode proved
+    non-deterministic (flaky pass/hang depending on unrelated system load),
+    while the actual decision this fix makes -- refuse on >1 candidate --
+    has nothing to do with browser timing and is exactly and only what a
+    fake two-page browser needs to exercise."""
+    from engine.interact import InteractError, _pick_page
+
+    class _FakePage:
+        def __init__(self, url):
+            self.url = url
+
+    class _FakeContext:
+        def __init__(self, pages):
+            self.pages = pages
+
+    class _FakeBrowser:
+        def __init__(self, contexts):
+            self.contexts = contexts
+
+    browser = _FakeBrowser([_FakeContext([
+        _FakePage("http://example.invalid/"),
+        _FakePage("http://example.invalid/popup"),
+    ])])
+
+    with pytest.raises(InteractError, match="non-internal pages are open"):
+        _pick_page(browser)
