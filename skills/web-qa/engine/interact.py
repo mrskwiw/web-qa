@@ -314,22 +314,40 @@ def read(state_path: str) -> Dict[str, Any]:
     return asyncio.run(_do())
 
 
-def _process_cmdline(pid: int) -> str:
-    """Best-effort: the running process's own command line, or "" if it can't
-    be read (already exited, no permission, platform tool unavailable)."""
+def _process_cmdline(pid: int) -> Optional[str]:
+    """The running process's own command line, or:
+    - ``""`` when the check genuinely ran and found no such process (it
+      already exited) -- a confident negative.
+    - ``None`` when the check itself could not run (platform tool missing,
+      denied, or errored) -- unknown, not negative.
+
+    Uses PowerShell's `Get-CimInstance` on Windows, not `wmic`: confirmed
+    live on a current Windows 11 build that `wmic` itself returns a non-zero
+    exit code and no output for an ordinary, real, currently-running PID --
+    `wmic` is deprecated and unreliable-to-absent on modern Windows, not a
+    rare corner case worth a graceful fallback for. `Get-CimInstance`
+    confirmed working the same way for both a real PID and a nonexistent one
+    (empty output, exit 0 -- a clean negative, not an error) before this was
+    trusted for `stop`'s kill decision."""
     try:
         if sys.platform == "win32":
             out = subprocess.run(
-                ["wmic", "process", "where", f"processid={pid}", "get", "CommandLine"],
-                capture_output=True, text=True, timeout=5, check=False,
+                [
+                    "powershell", "-NoProfile", "-Command",
+                    f"Get-CimInstance Win32_Process -Filter \"ProcessId={pid}\" "
+                    "| Select-Object -ExpandProperty CommandLine",
+                ],
+                capture_output=True, text=True, timeout=10, check=False,
             )
+            if out.returncode != 0:
+                return None
             return out.stdout or ""
         cmdline_path = Path(f"/proc/{pid}/cmdline")
         if cmdline_path.exists():
             return cmdline_path.read_text(encoding="utf-8", errors="replace").replace("\x00", " ")
-    except Exception:  # noqa: BLE001 — can't verify, so don't kill
-        pass
-    return ""
+        return ""
+    except Exception:  # noqa: BLE001 — the check itself failed, not a negative result
+        return None
 
 
 def stop(state_path: str) -> Dict[str, Any]:
@@ -345,12 +363,45 @@ def stop(state_path: str) -> Dict[str, Any]:
     `rmtree` to a path this module's own `tempfile.mkdtemp(prefix="wd-interact-")`
     would have produced, means a stale or tampered state file can fail to
     clean up but can never kill an unrelated process or delete an arbitrary
-    directory."""
+    directory.
+
+Refuses to kill whenever verification does not come back as a CONFIRMED
+    match -- an unavailable check (`_process_cmdline` returns `None`) is
+    treated the same as a confirmed non-match, not as "assume yes and kill
+    anyway." A second review argued the opposite default (kill when
+    unverifiable) to avoid leaking the chromium process; that was tried and
+    reverted after it turned out `wmic` returns a non-zero exit for an
+    ordinary, real, currently-running process on a real, current Windows
+    build tested live -- "verification unavailable" is not the rare corner
+    case that tradeoff assumed, it was effectively the ALWAYS case with
+    `wmic`, which would have made the kill-anyway fallback fire on every
+    single `stop` call and defeat the PID check entirely. Switching to
+    PowerShell's `Get-CimInstance` (see `_process_cmdline`) fixed the
+    underlying reliability problem instead of papering over it with a
+    weaker default; an occasional leaked profile dir when a check tool is
+    genuinely absent is still the correct failure mode to prefer over ever
+    killing a process this session didn't launch.
+
+    Two further hardenings a second review raised are DELIBERATELY NOT
+    applied, and won't be without a concrete report of them mattering in
+    practice: closing the microsecond TOCTOU window between this check and
+    the kill call with an OS-level process handle, and replacing the
+    profile-dir substring/prefix check with a cryptographic ownership token.
+    Both add real complexity to a LOCAL, single-operator CLI helper with no
+    adversarial input path -- the process this launches is on the same
+    machine, under the same user, for the same short-lived session as the
+    caller. The failure mode being defended against (a PID happens to be
+    reused by something else in the instant between check and kill, or a
+    hand-crafted state file's path happens to collide with an unrelated
+    directory) is a nuisance for a dev tool, not a security compromise, and
+    chasing it further is exactly the reviewer ping-pong this project's own
+    convention says to stop and make a call on instead."""
     state = _read_state(state_path)
     pid = state["pid"]
     profile_dir = state.get("profile_dir", "")
 
-    if profile_dir and profile_dir in _process_cmdline(pid):
+    cmdline = _process_cmdline(pid) if profile_dir else ""
+    if cmdline is not None and profile_dir in cmdline:
         try:
             if sys.platform == "win32":
                 subprocess.run(

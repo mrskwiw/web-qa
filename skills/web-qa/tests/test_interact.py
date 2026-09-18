@@ -208,6 +208,57 @@ def test_interact_stop_refuses_to_kill_a_pid_that_does_not_match_the_profile_dir
     # not sent taskkill/SIGKILL despite the state file naming its own pid.
 
 
+def test_interact_stop_refuses_the_kill_when_verification_itself_is_unavailable(tmp_path, monkeypatch):
+    """Second post-commit review round (2026-09-18): first tried the OPPOSITE
+    default (kill when verification can't run at all, to avoid leaking the
+    chromium process on a missing tool) -- reverted after confirming live on
+    this real Windows box that the original `wmic`-based check returns a
+    non-zero exit for an ordinary, real, running process. "Unverifiable" was
+    not the rare corner case that tradeoff assumed; with a broken `wmic` it
+    was effectively the ALWAYS case, which would fire the kill-anyway
+    fallback on every single `stop` call and defeat the PID check entirely.
+    Switching to PowerShell's `Get-CimInstance` fixed the underlying
+    reliability problem; `stop` itself stays safe-by-default regardless --
+    an unverifiable check refuses the kill, same as a confirmed non-match.
+
+    Mocks `_process_cmdline` to return `None` (the "couldn't check" case) and
+    confirms `stop` does NOT attempt the kill."""
+    import engine.interact as interact_module
+
+    killed = {}
+
+    def fake_cmdline(pid):
+        return None  # simulates a verification tool that could not run at all
+
+    def fake_run(args, **kwargs):
+        killed["taskkill_args"] = args
+        class _Result:
+            returncode = 0
+        return _Result()
+
+    monkeypatch.setattr(interact_module, "_process_cmdline", fake_cmdline)
+    monkeypatch.setattr(interact_module.subprocess, "run", fake_run)
+
+    state = tmp_path / "session.json"
+    state.write_text(
+        json.dumps({
+            "schema": 1,
+            "pid": 999999,
+            "port": 0,
+            "profile_dir": str(tmp_path / "wd-interact-fake"),
+            "entry_url": "http://example.invalid",
+        }),
+        encoding="utf-8",
+    )
+
+    result = interact_module.stop(str(state))
+
+    assert result["stopped"] is True
+    assert "taskkill_args" not in killed, (
+        "an unverifiable check must refuse the kill, not assume a match"
+    )
+
+
 def test_pick_page_refuses_to_guess_between_two_non_internal_pages():
     """Post-commit review (2026-09-18): silently picking a page by position
     (or any heuristic) after a click opens a popup/new tab risks a later
