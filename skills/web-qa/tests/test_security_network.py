@@ -138,3 +138,42 @@ def test_cli_sweep_command_end_to_end(tmp_path):
     assert out["base_url"] == base
     assert any(f["path"] == "/api/open/list" for f in out["flagged"])
     assert out["coverage"].startswith("PARTIAL")
+
+
+def test_cli_sweep_refuses_include_mutating_without_yes(tmp_path):
+    """BUGS.md 2026-08-14: a mutating sweep fires real POST/PUT/PATCH/DELETE at
+    every endpoint the spec advertises -- the same self-declared-risk shape as
+    `flow --destructive`, so it needs the same `--yes` gate. Refused before any
+    network call: the server records zero requests."""
+    spec_file = tmp_path / "openapi.json"
+    spec_file.write_text(json.dumps(_OPENAPI), encoding="utf-8")
+    with _server() as base:
+        res = CliRunner().invoke(
+            cli,
+            ["sweep", "--url", base, "--openapi", str(spec_file), "--include-mutating"],
+        )
+    assert res.exit_code == 0, res.output
+    out = json.loads(res.output)
+    assert out["refused"] is True
+    assert out["swept"] == 0
+    assert out["flagged"] == []
+    assert "requires --yes" in out["reason"]
+
+
+def test_cli_sweep_runs_include_mutating_with_yes(tmp_path):
+    spec_file = tmp_path / "openapi.json"
+    spec_file.write_text(json.dumps(_OPENAPI), encoding="utf-8")
+    with _server() as base:
+        res = CliRunner().invoke(
+            cli,
+            [
+                "sweep", "--url", base, "--openapi", str(spec_file),
+                "--include-mutating", "--yes",
+            ],
+        )
+    assert res.exit_code == 0, res.output
+    out = json.loads(res.output)
+    assert "refused" not in out
+    assert out["include_mutating"] is True
+    assert out["skipped_mutating"] == 0
+    assert any(f["path"] == "/api/health/cache/clear" for f in out["flagged"])

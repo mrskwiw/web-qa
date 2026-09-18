@@ -705,7 +705,14 @@ def a11y(
     default=False,
     help="Also probe POST/PUT/PATCH/DELETE. These send REAL requests that WOULD "
     "execute on an unprotected endpoint (delete/clear/etc) — use only on test "
-    "targets. Default: skip them (safe) and report how many were skipped.",
+    "targets. Default: skip them (safe) and report how many were skipped. "
+    "Refuses to run unless --yes is also passed.",
+)
+@click.option(
+    "--yes",
+    is_flag=True,
+    default=False,
+    help="Confirm running a --include-mutating sweep.",
 )
 @click.option(
     "--output", type=click.Path(), default=None, help="Also write sweep JSON here."
@@ -715,13 +722,38 @@ def sweep(
     openapi: str,
     token_env: str | None,
     include_mutating: bool,
+    yes: bool,
     output: str | None,
 ) -> None:
     """Auth-enforcement sweep: probe endpoints with/without a token (spec §6.1).
 
     Safe by default — read-only (GET) probes; pass --include-mutating on a test
     target to also probe write verbs (which can execute on exposed endpoints).
+    A mutating sweep refuses to run (nothing probed, ``refused: true``) unless
+    ``--yes`` is also passed — same self-declared-risk gate as ``flow
+    --destructive``/``--costs``: the session's own Bash permission prompt is the
+    outer backstop, but --include-mutating fires real writes at every endpoint
+    the spec advertises, and that risk deserves its own explicit confirmation
+    rather than riding in on however permissively the session happens to be
+    configured (BUGS.md 2026-08-14).
     """
+    if include_mutating and not yes:
+        _emit(
+            {
+                "base_url": url,
+                "swept": 0,
+                "include_mutating": True,
+                "skipped_mutating": 0,
+                "coverage": "REFUSED — mutating sweep requires --yes",
+                "flagged": [],
+                "duplicate_notes": [],
+                "errors": [],
+                "refused": True,
+                "reason": "refused: mutating sweep requires --yes",
+            },
+            output,
+        )
+        return
     token = os.environ.get(token_env) if token_env else None
     spec = security.load_openapi(openapi, url)
     result = security.sweep(url, spec, token=token, include_mutating=include_mutating)
