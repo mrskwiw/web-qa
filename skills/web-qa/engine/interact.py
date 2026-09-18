@@ -397,8 +397,24 @@ Refuses to kill whenever verification does not come back as a CONFIRMED
     chasing it further is exactly the reviewer ping-pong this project's own
     convention says to stop and make a call on instead."""
     state = _read_state(state_path)
-    pid = state["pid"]
     profile_dir = state.get("profile_dir", "")
+
+    # `pid` reaches a PowerShell command STRING in `_process_cmdline` (and a
+    # taskkill argv) -- a state file is exactly the "could be tampered" input
+    # this function's own docstring already reasons about, so a non-integer
+    # value here must never survive to be interpolated into either (a third
+    # post-commit review round correctly caught this: a hand-edited "pid" of
+    # e.g. "0; Remove-Item C:\\" would otherwise execute as PowerShell).
+    # str/int's own conversion rules are the whole check: a genuine int (or a
+    # clean digit string) survives, anything else raises here, well before
+    # either subprocess call.
+    try:
+        pid = int(state["pid"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise InteractError(
+            f"{state_path!r} has a non-integer pid ({state.get('pid')!r}) -- "
+            "refusing to use it in a process-management command"
+        ) from exc
 
     cmdline = _process_cmdline(pid) if profile_dir else ""
     if cmdline is not None and profile_dir in cmdline:

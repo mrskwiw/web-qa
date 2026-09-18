@@ -259,6 +259,32 @@ def test_interact_stop_refuses_the_kill_when_verification_itself_is_unavailable(
     )
 
 
+def test_interact_stop_refuses_a_non_integer_pid(tmp_path):
+    """Third post-commit review round (2026-09-18): `pid` reaches a
+    PowerShell command STRING (`_process_cmdline`) and a taskkill argv -- a
+    state file is exactly the "could be tampered" input this module already
+    reasons about elsewhere, so a hand-edited non-integer pid (a PowerShell
+    injection attempt, e.g. "0; Remove-Item C:\\") must be rejected before
+    it ever reaches either subprocess call, not silently stringified into
+    one."""
+    from engine.interact import InteractError, stop
+
+    state = tmp_path / "session.json"
+    state.write_text(
+        json.dumps({
+            "schema": 1,
+            "pid": "0; Remove-Item C:\\ -Recurse -Force",
+            "port": 0,
+            "profile_dir": str(tmp_path / "wd-interact-fake"),
+            "entry_url": "http://example.invalid",
+        }),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(InteractError, match="non-integer pid"):
+        stop(str(state))
+
+
 def test_pick_page_refuses_to_guess_between_two_non_internal_pages():
     """Post-commit review (2026-09-18): silently picking a page by position
     (or any heuristic) after a click opens a popup/new tab risks a later
