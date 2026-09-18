@@ -31,7 +31,7 @@ Run from this skill directory (`.claude/skills/web-qa/`):
 pip install -r requirements.txt && python -m playwright install chromium
 ```
 
-All engine commands are `python -m engine.cli …` run from here. Output is JSON on stdout (add `--output <file>` to also save it). Every subcommand is an **independent one-shot process** (one Chromium, no shared state except an optional read-only `--session` file), so the natural way to go fast is to run many of them **concurrently in separate subagents**.
+All engine commands are `python -m engine.cli …` run from here. Output is JSON on stdout (add `--output <file>` to also save it). Every subcommand is an **independent one-shot process** (one Chromium, no shared state except an optional read-only `--session` file), so the natural way to go fast is to run many of them **concurrently in separate subagents**. The one exception is `record` (§3a-bis), which is long-lived and human-driven: it belongs in the serial spine and is never fanned out.
 
 ## Orchestration — parallelize across independent work (default)
 
@@ -86,7 +86,7 @@ Read the snapshot and, for each candidate interaction, decide **what a reasonabl
 python -m engine.cli act --url <URL> --action '{"type":"click","selector":"<sel>","inferred_intent":"<what you expect>"}' [--screenshot <path>]
 ```
 
-`type` ∈ `navigate|click|fill|type|press|scroll|wait_for|select` (`select` drives a native `<select>` dropdown — set `value` to the option's visible label, e.g. picking a client in a report generator; falls back to matching the option value). Each call returns an **evidence bundle** with a `gate` result. Six **authoritative** checks decide `gate.passed`: `no_console_errors`, `http_status_ok`, `no_crash`, `no_error_page`, `navigation_sane`, `opened_pages_ok` (new-tab/external links). A seventh, `target_survived`, is **advisory** (`advisory: true`) — reported so you can weigh a vanished element, but it never fails the gate, because a disappearance is a semantic signal (often normal), not objective breakage.
+`type` ∈ `navigate|click|fill|type|press|scroll|wait_for|select` (plus `pause`, which is `flow`-only — see §3a) (`select` drives a native `<select>` dropdown — set `value` to the option's visible label, e.g. picking a client in a report generator; falls back to matching the option value). Each call returns an **evidence bundle** with a `gate` result. Six **authoritative** checks decide `gate.passed`: `no_console_errors`, `http_status_ok`, `no_crash`, `no_error_page`, `navigation_sane`, `opened_pages_ok` (new-tab/external links). A seventh, `target_survived`, is **advisory** (`advisory: true`) — reported so you can weigh a vanished element, but it never fails the gate, because a disappearance is a semantic signal (often normal), not objective breakage.
 
 **Gate-first short-circuit (cost control):**
 - If `gate.passed == false` → record a **deterministic** issue from the failing check(s) and **do NOT spend judgment on it** — the breakage is objective and authoritative. Move to the next interaction.
@@ -131,9 +131,63 @@ The session bundle stores the Playwright `storage_state` (cookies + localStorage
 
 For the rare stateful case `flow` can't express, drive Playwright directly with a single context you control — but prefer the session-reuse pattern above.
 
+**When a wall needs a human, `pause` mid-flow — never automate your way through it.** Some gates are deliberately un-scriptable: a bot challenge (Cloudflare Turnstile, reCAPTCHA), MFA, an SSO redirect, 3-D Secure. **Do not try to defeat these; it is an arms race a QA tool should not enter.** But a human clearing one *by hand, once, inside the flow's own context* defeats nothing — and every later step then runs with the resulting state in place. That is the `pause` step:
+
+```json
+{"type": "pause", "label": "clear the bot challenge",
+ "text": "Solve the Cloudflare check in the browser window.",
+ "selector": "textarea",   // resume the moment this appears ("url" works too)
+ "value": "300"}           // seconds to wait
+```
+
+Requires `--no-headless` — a `pause` in headless mode **fails the step immediately** rather than waiting blindly, because a challenge nobody can see could never be solved and step N+1 would run on an unmet precondition. Pair it with `--save-session`: the human solves the wall once, and every later run replays the cleared session headlessly. Prefer a `selector` that proves you are *through* the wall (the composer, the dashboard) over one that merely proves the challenge vanished.
+
+Use this only where a human really is required. It costs a person's attention and cannot be parallelized, so it belongs in the serial spine — never inside a fanned-out subagent (§ Orchestration).
+
 **Validate each step before executing the next. Never fire step N+1 assuming step N succeeded.** After every action, assert the expected state change actually happened — the write request fired and returned 2xx, the status/DOM updated, no error surfaced. If the assertion fails, **stop and record the failure at that step**; do not run later steps on top of it. Barrelling ahead produces two failures at once: you miss the real bug's location, and you generate garbage downstream evidence (later steps "fail" only because the state they needed was never created).
 
 This cuts both ways as a false-positive guard: if a "Save" looks like a no-op, confirm the action truly triggered (button enabled, click landed, required fields valid) **before** flagging it — a silent no-op is a real bug, but a harness that never triggered the save is not.
+
+### 3a-bis. `record` — let the human drive when discovery is the hard part
+
+Sometimes the obstacle is not judgment but **reach**: a surface you cannot get to because it is behind a login, a bot challenge, a paywall, or a control no ranker can pick out. Automated discovery has a hard ceiling here — on a React Native Web app every control is `button.css-<hash> >> nth=N` with the label in a nested text node, so ranking is uniform and a probe budget spent in DOM order never arrives. A person reaches it in one click.
+
+`record` inverts the roles: **the human navigates, the engine captures.**
+
+```bash
+python -m engine.cli record --url <BASE> --output recording.json \
+  --screenshot-dir shots/ --save-session .qa/session.json
+```
+
+A headed browser opens. The human drives — logs in, opens the creators, walks the settings. Meanwhile every distinct URL is inventoried automatically (full `explore` snapshot: ranked controls, forms, links, incomplete markers, a11y), plus all network and console output.
+
+- **`Ctrl+Shift+S` captures the current screen on demand.** Essential, not a nicety: modals, drawers, wizard steps, and creator panels usually never change the URL, so on-demand capture is the *only* way they enter the map. Tell the human to press it on every such panel. Recorded screens are tagged `trigger: "manual"` vs `"url"`.
+- **Pair it with `--save-session`.** The human logs in and clears the challenge once; every later `explore`/`act`/`flow` replays that session headlessly. This is the cheapest route through a wall you must not automate (§3a).
+- **Credentials are redacted in the page**, before any value reaches Python — `type="password"` and anything whose name/id/placeholder/autocomplete looks credential-shaped. Recording a real login is safe by construction; keystrokes are also coalesced per field, so a password can't leak letter by letter.
+
+**Then build the map from the recording — that is your job, not the engine's.** `summary` in the output gives you the deterministic skeleton (`screens`, `interactions_by_path`, `api`, `counts`); the engine deliberately stops there. Turn it into a map by naming what each surface *is* and what it is *for*: group screens into the app's real areas, describe each option/setting and its effect, note which controls are disabled or `incomplete`, record the observed API contract, and call out surfaces reached only manually (they are invisible to every automated crawl, so they need documenting most). Recorded selectors are chosen to be replayable — quote them, preferring `selector`, with `text_selector` as the readable alternative.
+
+A recording is also the seed for automation: a journey the human demonstrated once can be replayed as a `flow` steps file built from the recorded selectors and values.
+
+### 3a-ter. `interact` — the agent-driven complement to `record`, for building a `flow` script empirically
+
+`record`'s human drives when the obstacle is *reach*. `interact` is for when the obstacle is *not knowing the sequence yet* — a gated, multi-step journey (a signup wizard, a checkout) where writing `flow --steps` means guessing the whole sequence upfront from static markup and betting on it passing in one shot. A wrong guess three steps into a five-step wizard gives no signal about which step was wrong.
+
+`interact` keeps a real browser open across SEPARATE CLI calls, so you click one thing, see the ACTUAL result, and decide the next click — empirically discovering the sequence before you ever write a `flow` steps file:
+
+```bash
+python -m engine.cli interact start --url <URL> --state session.json [--session <auth-bundle>] [--headless]
+python -m engine.cli interact read  --state session.json
+python -m engine.cli interact click --state session.json --text "Continue"
+python -m engine.cli interact fill  --state session.json --selector "#foo" --value "bar"
+python -m engine.cli interact stop  --state session.json
+```
+
+Each call is a separate process; `--state` is the handle connecting them — reuse the same path for every action in one session, and always `stop` when done, or the detached chromium leaks. `click --text "..."` matches the first element containing that visible text; `--selector` targets precisely when text is ambiguous. `read`'s `content_preview` and `click`'s `changed`/`navigated` fields are your only feedback, on purpose — this is a discovery aid, not a replacement for `explore`/`act`. **`changed: false` is not proof nothing happened** — some UI transitions render slower than the fixed settle window; call `read` when it actually matters.
+
+No `--yes` gate, no auto-anything: `interact` guesses nothing and blocks nothing — every click is a call you chose to make. The backstop is the same one named below — the session's own Bash permission prompt over each `interact` invocation. Never script an unattended sequence of `interact` calls against destructive-looking or costed-looking controls.
+
+**Once the real sequence is known, still go through `flow`.** `interact` finding that a sequence works is not itself validated evidence — write the equivalent `steps.json` and run `flow` (§3a) to get the real evidence bundle, gate, and per-step `assert`, with `--destructive`/`--costs --yes` where the flow warrants it (below). `interact` is how you find the steps; `flow` is what proves them.
 
 ### 3b. Outcome verification — read the produced artifact and judge it (mandatory for output-producing actions)
 
@@ -230,6 +284,8 @@ Report auth findings as `deterministic` issues with `category: "security"`.
 **Never fire an irreversible interaction autonomously** — payments, deletes, sending mail, account changes, or submitting a form the snapshot marks `destructive: true` (e.g. a newsletter/signup — it creates a real record).
 
 There is no engine allowlist; this judgment is yours. When you classify a candidate as destructive, **ask the user for explicit confirmation before running `act` on it** — the session's Claude Code permission settings are the backstop. Read-only/idempotent actions (navigation, reading state) run freely.
+
+**For a multi-step `flow`, state the risk in the command itself.** The session's own Bash permission prompt is the outer backstop, but a human skimming a raw `steps.json` for a real delete or paid call buried in step 6 of 10 can miss it. `flow` accepts `--destructive`/`--costs` (declare that this run really deletes/cancels something, or really spends real credits/money without being destructive — a paid research call) plus `--yes` to confirm: declaring either without `--yes` refuses to run at all (nothing launched; the JSON result reports `metadata.refused: true` and why — `flow` never uses process exit codes for signaling, so check this field, not the exit code). Add `--yes` only after you've confirmed with the user, exactly as you would before running `act` on a destructive candidate.
 
 ## Notes & current limitations
 

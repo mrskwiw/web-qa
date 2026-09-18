@@ -17,6 +17,8 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import sys
+import time
 from pathlib import Path
 from typing import Any, Dict
 
@@ -27,7 +29,14 @@ from .browser import BrowserController
 from .evidence import EvidenceBundler
 from .flow import build_action, evaluate_assertion, fail_reason, slug
 from .gate import DeterministicGate
+from .interact import InteractError
+from .interact import click as interact_click_impl
+from .interact import fill as interact_fill_impl
+from .interact import read as interact_read_impl
+from .interact import start_session as start_interact_session
+from .interact import stop as interact_stop_impl
 from .models import Action, ActionType, BrowserEngine
+from .recorder import RECORDER_JS, Recording, RecordedEvent, RecordedRoute, summarize
 from .reporting import ReportGenerator
 
 _ENGINE_CHOICE = click.Choice([e.value for e in BrowserEngine])
@@ -252,6 +261,28 @@ def act(
     "replay (--session), since auth tokens are bound to a UA+IP fingerprint.",
 )
 @click.option(
+    "--destructive/--no-destructive",
+    default=False,
+    help="Declare this flow destructive. Refuses to run unless --yes is also passed "
+    "-- running a destructive flow means really performing it (a delete, a "
+    "cancellation), so it requires explicit confirmation on top of the session's "
+    "own Bash permission prompt, which a human can miss when it's buried in step "
+    "6 of a raw steps.json.",
+)
+@click.option(
+    "--costs/--no-costs",
+    default=False,
+    help="Declare this flow costed -- spends real credits or money even though it "
+    "is not destructive (a paid research run, a billed API call). Same gate as "
+    "--destructive: refuses to run unless --yes is also passed.",
+)
+@click.option(
+    "--yes",
+    is_flag=True,
+    default=False,
+    help="Confirm running a --destructive and/or --costs flow.",
+)
+@click.option(
     "--output", type=click.Path(), default=None, help="Also write flow JSON here."
 )
 def flow(
@@ -264,6 +295,9 @@ def flow(
     session: str | None,
     save_session: str | None,
     user_agent: str | None,
+    destructive: bool,
+    costs: bool,
+    yes: bool,
     output: str | None,
 ) -> None:
     """Run an ordered list of steps in ONE browser context (stateful, spec §4.2).
@@ -273,10 +307,39 @@ def flow(
     later steps never run on top of an unmet precondition; ``--continue-on-fail``
     overrides. Secrets are referenced by env var (``{"env":"VAR"}`` or ``${VAR}``)
     and never inlined in the steps file.
+
+    A flow declared ``--destructive`` and/or ``--costs`` refuses to run (nothing
+    launched, ``metadata.refused: true``) unless ``--yes`` is also passed -- the
+    session's own Bash permission prompt is the outer backstop, but a human
+    skimming a raw steps.json for a real delete or paid call buried mid-script can
+    miss it; this makes the agent state the risk itself, in the command it runs.
     """
     raw = json.loads(Path(steps_path).read_text(encoding="utf-8"))
     steps = raw["steps"] if isinstance(raw, dict) else raw
     env = os.environ
+
+    if (destructive or costs) and not yes:
+        reasons = []
+        if destructive:
+            reasons.append("destructive")
+        if costs:
+            reasons.append("costed")
+        refused: Dict[str, Any] = {
+            "metadata": {
+                "target_url": url,
+                "engine": engine,
+                "steps_total": len(steps),
+                "steps_run": 0,
+                "halted": True,
+                "session_saved": None,
+                "refused": True,
+                "reason": f"refused: {'/'.join(reasons)} flow requires --yes",
+            },
+            "steps": [],
+            "halted_at": None,
+        }
+        _emit(refused, output)
+        return
 
     async def run():
         controller = _controller(engine, headless, session, user_agent)
@@ -368,12 +431,211 @@ def flow(
                 "steps_run": len(results),
                 "halted": halted_at is not None,
                 "session_saved": session_saved,
+                "refused": False,
             },
             "steps": results,
             "halted_at": halted_at,
         }
 
     _emit(asyncio.run(run()), output)
+
+
+@cli.command()
+@click.option("--url", required=True, help="Where the session starts.")
+@click.option(
+    "--output", type=click.Path(), required=True, help="Write the recording JSON here."
+)
+@click.option(
+    "--screenshot-dir",
+    type=click.Path(),
+    default=None,
+    help="Capture a screenshot of every screen recorded.",
+)
+@click.option(
+    "--session",
+    type=click.Path(exists=True),
+    default=None,
+    help="Start already authenticated from a saved session.",
+)
+@click.option(
+    "--save-session",
+    type=click.Path(),
+    default=None,
+    help="Save the session on exit — so the login you just did by hand can be "
+    "replayed headlessly by every later run.",
+)
+@click.option(
+    "--max-minutes", default=30, help="Hard stop, so a forgotten window can't run forever."
+)
+@click.option(
+    "--browser", "engine", default=BrowserEngine.CHROMIUM.value, type=_ENGINE_CHOICE
+)
+@click.option("--user-agent", default=None, help="Pin the UA (see --save-session).")
+def record(
+    url: str,
+    output: str,
+    screenshot_dir: str | None,
+    session: str | None,
+    save_session: str | None,
+    max_minutes: int,
+    engine: str,
+    user_agent: str | None,
+) -> None:
+    """Watch a HUMAN use the app, and capture every screen they reach.
+
+    The inverse of ``flow``: you navigate, the engine records. Use it for the
+    surfaces automated discovery cannot reach — anything behind a login, a bot
+    challenge, a paywall, or (as on React Native Web apps) a control the ranker
+    cannot distinguish from ninety others.
+
+    Drive the app normally. Every distinct URL is inventoried automatically.
+    **Press Ctrl+Shift+S to capture the current screen on demand** — that is the
+    only way to record a modal, a drawer, a wizard step or a creator panel, none
+    of which change the URL. Close the browser window when you are done.
+
+    Passwords and other credential-shaped values are redacted in the page, before
+    they ever reach Python, so recording a real login is safe.
+    """
+    shots = Path(screenshot_dir) if screenshot_dir else None
+
+    async def run():
+        controller = _controller(engine, False, session, user_agent)
+        await controller.launch()
+
+        events: list[RecordedEvent] = []
+        routes: list[RecordedRoute] = []
+        seen_urls: set[str] = set()
+        manual_requests: list[dict] = []
+
+        def on_event(raw: dict) -> None:
+            if raw.get("type") == "snapshot_request":
+                manual_requests.append(raw)
+                return
+            events.append(
+                RecordedEvent(
+                    type=str(raw.get("type")),
+                    t=int(raw.get("t") or 0),
+                    url=str(raw.get("url") or ""),
+                    element=raw.get("element"),
+                    value=raw.get("value"),
+                    key=raw.get("key"),
+                    via=raw.get("via"),
+                    fields=raw.get("fields"),
+                )
+            )
+
+        await controller.install_recorder(RECORDER_JS, on_event)
+        controller.wire_page(controller.page)
+        controller.context.on("page", controller.wire_page)
+
+        async def capture(trigger: str) -> None:
+            page = controller.page
+            try:
+                snapshot = await controller.capture_snapshot()
+                title = await page.title()
+            except Exception as exc:  # noqa: BLE001 — a screen we cannot read is
+                # still worth listing; dropping it would silently shrink the map.
+                snapshot, title = None, f"<capture failed: {exc}>"
+            shot = None
+            if shots:
+                name = f"{len(routes) + 1:03d}-{slug(page.url.split('/')[-1] or 'screen')}.png"
+                try:
+                    shot = await controller.screenshot(str(shots / name))
+                except Exception:  # noqa: BLE001
+                    shot = None
+            routes.append(
+                RecordedRoute(
+                    url=page.url,
+                    title=title,
+                    trigger=trigger,
+                    at=int(time.time() * 1000),
+                    screenshot=shot,
+                    snapshot=snapshot,
+                )
+            )
+            click.echo(
+                f"  [{len(routes):3d}] {trigger:6s} {page.url}"
+                f"{'' if snapshot is None else f' ({len(snapshot.interactive)} controls)'}",
+                err=True,
+            )
+
+        click.echo(f"Recording. Browser open at {url}", err=True)
+        click.echo(
+            "  Drive the app normally — log in, open the creators, walk the settings.\n"
+            "  Ctrl+Shift+S  capture the current screen (modals, drawers, wizard steps)\n"
+            "  Close the window when you're done.",
+            err=True,
+        )
+
+        await controller.navigate(url)
+        deadline = time.time() + max_minutes * 60
+        last_url = None
+        stable_since = 0.0
+
+        while time.time() < deadline:
+            live = controller.live_pages()
+            if not live:
+                break
+            # Follow the human between tabs: the newest live page is the one
+            # they are looking at.
+            if controller.page.is_closed() or controller.page not in live:
+                controller.set_active_page(live[-1])
+
+            while manual_requests:
+                manual_requests.pop(0)
+                await capture("manual")
+
+            try:
+                current = controller.page.url
+            except Exception:  # noqa: BLE001 — mid-navigation
+                await asyncio.sleep(0.4)
+                continue
+
+            if current != last_url:
+                last_url = current
+                stable_since = time.time()
+            elif (
+                stable_since
+                and time.time() - stable_since > 1.2
+                and current not in seen_urls
+                and not current.startswith("about:")
+            ):
+                # Snapshot only once the URL has held still, so a redirect chain
+                # records its destination rather than each hop.
+                seen_urls.add(current)
+                await capture("url")
+
+            await asyncio.sleep(0.4)
+
+        saved = None
+        if save_session:
+            try:
+                saved = await controller.save_session(save_session, user_agent=user_agent)
+            except Exception as exc:  # noqa: BLE001
+                saved = f"ERROR: {exc}"
+
+        recording = Recording(
+            metadata={
+                "start_url": url,
+                "engine": engine,
+                "stopped": "window closed" if time.time() < deadline else "max-minutes",
+                "session_saved": saved,
+            },
+            routes=routes,
+            events=events,
+            network=controller.recorded_network(),
+            console_errors=controller.console_errors(),
+        )
+        try:
+            await controller.close()
+        except Exception:  # noqa: BLE001 — the human already closed it
+            pass
+        return recording
+
+    recording = asyncio.run(run())
+    payload = recording.to_dict()
+    payload["summary"] = summarize(recording)
+    _emit(payload, output)
 
 
 @cli.command()
@@ -485,6 +747,120 @@ def report(input_path: str, output: str) -> None:
     results = json.loads(Path(input_path).read_text(encoding="utf-8"))
     paths = ReportGenerator(output_dir=output).render(results)
     click.echo(json.dumps({k: str(v) for k, v in paths.items()}, indent=2))
+
+
+@cli.group()
+def interact() -> None:
+    """A persistent, agent-driven browser session spanning SEPARATE CLI calls.
+
+    ``flow --steps`` needs a complete step sequence guessed upfront from static
+    markup, bet on all at once against a real page -- workable for a short flow,
+    unreliable for a gated multi-step journey (a signup wizard, a checkout) where
+    a wrong guess three steps in gives no signal about which step was wrong.
+    `start` once, then `click`/`fill`/`read` one action at a time against the SAME
+    live page across as many separate invocations as it takes, `stop` when done --
+    then write the now-empirically-known sequence as `flow --steps` and get the
+    real evidence bundle + gate + assertion `flow` provides. No engine allowlist,
+    no auto-chaining, no guessed values -- every action is one explicit call the
+    agent chooses to make. See engine/interact.py.
+    """
+
+
+@interact.command("start")
+@click.option("--url", required=True, help="Page to open once the session starts.")
+@click.option(
+    "--state",
+    "state_path",
+    required=True,
+    type=click.Path(),
+    help="Where to write this session's handle -- pass the SAME path to every "
+    "later `interact` call. Refuses to overwrite an existing one (stop it first) "
+    "so a browser process is never silently leaked.",
+)
+@click.option(
+    "--session",
+    default=None,
+    type=click.Path(exists=True),
+    help="Seed cookies/localStorage from a saved auth bundle (same format as "
+    "`flow --session`).",
+)
+@click.option("--user-agent", default=None, help="Pin the user-agent for this session.")
+@click.option("--headless/--no-headless", default=True)
+@click.option(
+    "--timeout-s", default=10.0, type=float, help="How long to wait for chromium to start."
+)
+def interact_start(
+    url: str,
+    state_path: str,
+    session: str | None,
+    user_agent: str | None,
+    headless: bool,
+    timeout_s: float,
+) -> None:
+    """Launch a detached chromium and navigate to --url."""
+    try:
+        result = start_interact_session(
+            state_path, url, session=session, user_agent=user_agent,
+            headless=headless, timeout_s=timeout_s,
+        )
+    except InteractError as exc:
+        click.echo(json.dumps({"error": str(exc)}))
+        sys.exit(1)
+    _emit(result, None)
+
+
+@interact.command("click")
+@click.option("--state", "state_path", required=True, type=click.Path(exists=True))
+@click.option("--text", default=None, help="Click the first element containing this text.")
+@click.option(
+    "--selector", default=None, help="Click by CSS/role selector instead of --text."
+)
+def interact_click(state_path: str, text: str | None, selector: str | None) -> None:
+    """Click one control and report whether the page navigated or just changed."""
+    try:
+        result = interact_click_impl(state_path, text=text, selector=selector)
+    except InteractError as exc:
+        click.echo(json.dumps({"error": str(exc)}))
+        sys.exit(1)
+    _emit(result, None)
+
+
+@interact.command("fill")
+@click.option("--state", "state_path", required=True, type=click.Path(exists=True))
+@click.option("--selector", required=True, help="Field to fill.")
+@click.option("--value", required=True, help="Text to type.")
+def interact_fill(state_path: str, selector: str, value: str) -> None:
+    """Fill one field."""
+    try:
+        result = interact_fill_impl(state_path, selector, value)
+    except InteractError as exc:
+        click.echo(json.dumps({"error": str(exc)}))
+        sys.exit(1)
+    _emit(result, None)
+
+
+@interact.command("read")
+@click.option("--state", "state_path", required=True, type=click.Path(exists=True))
+def interact_read(state_path: str) -> None:
+    """Report the current URL/title/visible-text preview, no action taken."""
+    try:
+        result = interact_read_impl(state_path)
+    except InteractError as exc:
+        click.echo(json.dumps({"error": str(exc)}))
+        sys.exit(1)
+    _emit(result, None)
+
+
+@interact.command("stop")
+@click.option("--state", "state_path", required=True, type=click.Path(exists=True))
+def interact_stop(state_path: str) -> None:
+    """Kill the detached chromium and remove the session handle."""
+    try:
+        result = interact_stop_impl(state_path)
+    except InteractError as exc:
+        click.echo(json.dumps({"error": str(exc)}))
+        sys.exit(1)
+    _emit(result, None)
 
 
 def main() -> None:

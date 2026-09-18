@@ -78,6 +78,81 @@ def test_flow_save_session_round_trip(tmp_path):
     assert json.loads(res.output)["metadata"]["session_saved"]
 
 
+def test_flow_refuses_a_destructive_run_without_yes(tmp_path):
+    """`--destructive` is a per-flow risk self-declaration: the session's own Bash
+    permission prompt is the outer backstop, but a human skimming a raw steps.json
+    for a real delete buried in step 6 can miss it. Refuses (nothing launched)
+    without --yes."""
+    steps_file = tmp_path / "steps.json"
+    steps_file.write_text(
+        json.dumps([{"type": "click", "selector": "#save", "label": "save"}]),
+        encoding="utf-8",
+    )
+    res = CliRunner().invoke(cli, [
+        "flow", "--url", FIXTURE.as_uri(), "--steps", str(steps_file), "--destructive",
+    ])
+    assert res.exit_code == 0, res.output  # web-qa's CLI never uses exit codes for signaling
+    data = json.loads(res.output)
+    assert data["metadata"]["refused"] is True
+    assert "destructive" in data["metadata"]["reason"]
+    assert data["metadata"]["steps_run"] == 0
+    assert data["steps"] == []
+
+
+def test_flow_runs_a_destructive_run_with_yes(tmp_path):
+    data = _run_flow_with_flags(
+        tmp_path,
+        [{"type": "click", "selector": "#save", "label": "save", "assert": {"dom_contains": "Saved!"}}],
+        ["--destructive", "--yes"],
+    )
+    assert data["metadata"]["refused"] is False
+    assert data["metadata"]["steps_run"] == 1
+    assert data["steps"][0]["passed"] is True
+
+
+def test_flow_refuses_a_costed_run_without_yes(tmp_path):
+    """`--costs` is `--destructive`'s sibling gate: a flow that spends real credits
+    or money without being destructive (a paid research call) was otherwise
+    ungated entirely."""
+    steps_file = tmp_path / "steps.json"
+    steps_file.write_text(
+        json.dumps([{"type": "click", "selector": "#save", "label": "save"}]),
+        encoding="utf-8",
+    )
+    res = CliRunner().invoke(cli, [
+        "flow", "--url", FIXTURE.as_uri(), "--steps", str(steps_file), "--costs",
+    ])
+    assert res.exit_code == 0, res.output
+    data = json.loads(res.output)
+    assert data["metadata"]["refused"] is True
+    assert "costed" in data["metadata"]["reason"]
+    assert data["steps"] == []
+
+
+def test_flow_runs_a_costed_run_with_yes(tmp_path):
+    data = _run_flow_with_flags(
+        tmp_path,
+        [{"type": "click", "selector": "#save", "label": "save", "assert": {"dom_contains": "Saved!"}}],
+        ["--costs", "--yes"],
+    )
+    assert data["metadata"]["refused"] is False
+    assert data["steps"][0]["passed"] is True
+
+
+def _run_flow_with_flags(tmp_path, steps, extra_flags):
+    steps_file = tmp_path / "steps.json"
+    steps_file.write_text(json.dumps(steps), encoding="utf-8")
+    res = CliRunner().invoke(
+        cli, ["flow", "--url", FIXTURE.as_uri(), "--steps", str(steps_file), *extra_flags]
+    )
+    if res.exit_code != 0:
+        msg = str(res.exception or res.output)
+        if "Executable doesn't exist" in msg or "playwright install" in msg:
+            pytest.skip("Chromium not installed for Playwright")
+        raise AssertionError(f"flow failed: {msg}")
+    return json.loads(res.output)
+
+
 def test_explore_smoke(tmp_path):
     res = CliRunner().invoke(cli, ["explore", "--url", FIXTURE.as_uri()])
     if res.exit_code != 0:
