@@ -277,15 +277,25 @@ _SNAPSHOT_JS = r"""
     const DESTRUCTIVE = /\b(pay|checkout|purchase|place order|delete|remove|cancel account|unsubscribe|sign\s*up|register|create account)\b/;
     const LOGIN = /\b(log\s*in|sign\s*in)\b/;
     const hasPassword = fields.some((x) => x.type === 'password');
-    // A form whose OWN submit is a login action is never destructive, no matter
-    // what else the whole form's text contains -- a login commonly nests a
-    // "Don't have an account? Sign up" cross-link inside the SAME <form>, and
-    // "sign up" alone would otherwise satisfy DESTRUCTIVE against the whole-form
-    // text below (found live on quizsquirrel.com's /login, 2026-09-16/18). Only
-    // the SUBMIT's own wording earns this exemption -- the whole-form scan stays
-    // exactly as-is for every other form shape, so this narrows nothing else.
+    // A form whose OWN (and ONLY) submit is a login action is never destructive,
+    // no matter what else the whole form's text contains -- a login commonly
+    // nests a "Don't have an account? Sign up" cross-link inside the SAME
+    // <form>, and "sign up" alone would otherwise satisfy DESTRUCTIVE against
+    // the whole-form text below (found live on quizsquirrel.com's /login,
+    // 2026-09-16/18). Gated on exactly ONE submit-capable control existing in
+    // the form (post-commit review, 2026-09-18): `submitEl` above resolves to
+    // only ONE winner by priority order, so a form with a SECOND, genuinely
+    // destructive submit (e.g. "Sign in" + "Delete account" as two buttons in
+    // one <form>) must not have that second action's risk hidden behind
+    // whichever button the priority chain happened to pick. With more than one
+    // submit candidate this exemption does not apply and the whole-form scan
+    // below runs exactly as it always has.
+    const submitCandidates = new Set([
+      ...f.querySelectorAll('button[type=submit], input[type=submit], input[type=image]'),
+      ...nonSubmit,
+    ]);
     const submitText = (submitEl ? (submitEl.innerText || submitEl.value || '') : '').toLowerCase();
-    const isLoginSubmit = LOGIN.test(submitText);
+    const isLoginSubmit = submitCandidates.size === 1 && LOGIN.test(submitText);
     const destructive = !isLoginSubmit && (DESTRUCTIVE.test(text) || (hasPassword && !LOGIN.test(text)));
     forms.push({ selector: sel(f), fields, submit: submitEl ? sel(submitEl) : null, destructive });
   }

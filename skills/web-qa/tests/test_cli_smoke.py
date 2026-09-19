@@ -21,6 +21,7 @@ _FIXTURES = Path(__file__).parent / "fixtures"
 FIXTURE = (_FIXTURES / "form.html").resolve()
 HIDDEN_DUP_FIXTURE = (_FIXTURES / "dup_hidden.html").resolve()
 LOGIN_WITH_SIGNUP_LINK_FIXTURE = (_FIXTURES / "login_with_signup_link.html").resolve()
+LOGIN_WITH_SECOND_SUBMIT_FIXTURE = (_FIXTURES / "login_with_second_submit.html").resolve()
 
 
 def _run_flow(tmp_path, steps, url=None):
@@ -218,6 +219,29 @@ def test_explore_does_not_misclassify_a_login_form_with_a_signup_cross_link():
     assert delete_form["destructive"] is True, (
         "genuinely destructive form must still be flagged -- the fix must not "
         "widen into a blanket exemption"
+    )
+
+
+def test_explore_does_not_exempt_a_second_destructive_submit_in_the_same_form():
+    """Post-commit Codex review (2026-09-18) of the login-exemption fix above:
+    `submitEl` resolves to only ONE winner by priority order, so a single
+    <form> with TWO submit buttons ("Sign in" AND "Delete account") must not
+    have the second action's risk hidden just because the priority chain
+    happened to pick the login one. The exemption is gated on exactly one
+    submit-capable control existing in the form -- with two, this form must
+    still come out destructive."""
+    res = CliRunner().invoke(
+        cli, ["explore", "--url", LOGIN_WITH_SECOND_SUBMIT_FIXTURE.as_uri()]
+    )
+    if res.exit_code != 0:
+        msg = str(res.exception or res.output)
+        if "Executable doesn't exist" in msg or "playwright install" in msg:
+            pytest.skip("Chromium not installed for Playwright")
+        raise AssertionError(msg)
+    snap = json.loads(res.output)
+    assert snap["forms"][0]["destructive"] is True, (
+        "a form with a second, genuinely destructive submit must not be "
+        "exempted just because the resolved submitEl says 'Sign in'"
     )
 
 
