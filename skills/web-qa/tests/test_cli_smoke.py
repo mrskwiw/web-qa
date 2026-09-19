@@ -24,6 +24,7 @@ LOGIN_WITH_SIGNUP_LINK_FIXTURE = (_FIXTURES / "login_with_signup_link.html").res
 LOGIN_WITH_SECOND_SUBMIT_FIXTURE = (_FIXTURES / "login_with_second_submit.html").resolve()
 LOGIN_WITH_EXTERNAL_SUBMIT_FIXTURE = (_FIXTURES / "login_with_external_submit.html").resolve()
 FLAT_RANK_FIXTURE = (_FIXTURES / "flat_rank.html").resolve()
+UNIFORM_MAIN_CTA_FIXTURE = (_FIXTURES / "uniform_main_cta.html").resolve()
 
 
 def _run_flow(tmp_path, steps, url=None):
@@ -349,6 +350,30 @@ def test_explore_falls_back_to_label_priority_when_every_control_ties_at_one_ran
     # the promoted one
     home = next(e for e in interactive if e["text"] == "Home")
     assert home["rank"] == 2
+
+
+def test_explore_does_not_apply_the_rank_fallback_to_a_page_with_several_real_main_ctas():
+    """Post-commit Codex review (2026-09-19), high severity, confirmed valid:
+    the original guard checked only that every control shares ONE rank, not
+    that the shared rank is the UNRANKED default (4) -- a page with several
+    legitimate main-CTA buttons and nothing else ALSO has every element at
+    one rank (0, a real positive landmark match), and the buggy guard would
+    have run the label guess over it too, demoting "Delete"/"Edit"/"Archive"
+    (matching neither keyword list) from their correct rank 0 down to a
+    guessed neutral rank. Only a page where every element is UNRANKED (4)
+    may trigger the fallback."""
+    res = CliRunner().invoke(cli, ["explore", "--url", UNIFORM_MAIN_CTA_FIXTURE.as_uri()])
+    if res.exit_code != 0:
+        msg = str(res.exception or res.output)
+        if "Executable doesn't exist" in msg or "playwright install" in msg:
+            pytest.skip("Chromium not installed for Playwright")
+        raise AssertionError(msg)
+    snap = json.loads(res.output)
+    ranks = {e["rank"] for e in snap["interactive"]}
+    assert ranks == {0}, (
+        f"three real main CTAs sharing a legitimate rank must not be "
+        f"reclassified by the RNW fallback: {snap['interactive']}"
+    )
 
 
 def test_explore_does_not_apply_the_rank_fallback_when_ranks_already_differ():
