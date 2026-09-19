@@ -22,6 +22,7 @@ FIXTURE = (_FIXTURES / "form.html").resolve()
 HIDDEN_DUP_FIXTURE = (_FIXTURES / "dup_hidden.html").resolve()
 LOGIN_WITH_SIGNUP_LINK_FIXTURE = (_FIXTURES / "login_with_signup_link.html").resolve()
 LOGIN_WITH_SECOND_SUBMIT_FIXTURE = (_FIXTURES / "login_with_second_submit.html").resolve()
+LOGIN_WITH_EXTERNAL_SUBMIT_FIXTURE = (_FIXTURES / "login_with_external_submit.html").resolve()
 
 
 def _run_flow(tmp_path, steps, url=None):
@@ -242,6 +243,30 @@ def test_explore_does_not_exempt_a_second_destructive_submit_in_the_same_form():
     assert snap["forms"][0]["destructive"] is True, (
         "a form with a second, genuinely destructive submit must not be "
         "exempted just because the resolved submitEl says 'Sign in'"
+    )
+
+
+def test_explore_counts_a_form_id_associated_external_submit_too():
+    """Second post-commit Codex review round (2026-09-18): HTML lets a submit
+    control live OUTSIDE the <form> element and still submit it via
+    `form="id"`. Round 1's fix counted only descendant submit controls, so a
+    page with one descendant "Sign in" button and an EXTERNAL
+    `<button form="account">Delete account</button>` would have counted
+    exactly one candidate and wrongly exempted the form. The candidate count
+    must resolve association the way the browser does (`el.form`), not by
+    descendant position."""
+    res = CliRunner().invoke(
+        cli, ["explore", "--url", LOGIN_WITH_EXTERNAL_SUBMIT_FIXTURE.as_uri()]
+    )
+    if res.exit_code != 0:
+        msg = str(res.exception or res.output)
+        if "Executable doesn't exist" in msg or "playwright install" in msg:
+            pytest.skip("Chromium not installed for Playwright")
+        raise AssertionError(msg)
+    snap = json.loads(res.output)
+    assert snap["forms"][0]["destructive"] is True, (
+        "an externally-associated (form='id') destructive submit must still "
+        "count toward the exactly-one check"
     )
 
 
