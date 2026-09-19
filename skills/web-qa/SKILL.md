@@ -152,7 +152,7 @@ This cuts both ways as a false-positive guard: if a "Save" looks like a no-op, c
 
 ### 3a-bis. `record` — let the human drive when discovery is the hard part
 
-Sometimes the obstacle is not judgment but **reach**: a surface you cannot get to because it is behind a login, a bot challenge, a paywall, or a control no ranker can pick out. Automated discovery has a hard ceiling here — on a React Native Web app every control is `button.css-<hash> >> nth=N` with the label in a nested text node, so ranking is uniform and a probe budget spent in DOM order never arrives. A person reaches it in one click.
+Sometimes the obstacle is not judgment but **reach**: a surface you cannot get to because it is behind a login, a bot challenge, a paywall, or a control no ranker can pick out. Automated discovery still has a ceiling here — on a React Native Web app every control is `button.css-<hash> >> nth=N` with the label in a nested text node, so the landmark-based rank ties everything at one value; `explore` now falls back to a label-priority guess (start/play/begin/… over home/profile/notifications/…, BUGS.md 2026-08-26) when that happens, but it's a heuristic, not a guarantee — a control whose label matches neither list still falls back to DOM order among its peers. A person reaches it in one click regardless.
 
 `record` inverts the roles: **the human navigates, the engine captures.**
 

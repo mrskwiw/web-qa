@@ -23,6 +23,7 @@ HIDDEN_DUP_FIXTURE = (_FIXTURES / "dup_hidden.html").resolve()
 LOGIN_WITH_SIGNUP_LINK_FIXTURE = (_FIXTURES / "login_with_signup_link.html").resolve()
 LOGIN_WITH_SECOND_SUBMIT_FIXTURE = (_FIXTURES / "login_with_second_submit.html").resolve()
 LOGIN_WITH_EXTERNAL_SUBMIT_FIXTURE = (_FIXTURES / "login_with_external_submit.html").resolve()
+FLAT_RANK_FIXTURE = (_FIXTURES / "flat_rank.html").resolve()
 
 
 def _run_flow(tmp_path, steps, url=None):
@@ -320,6 +321,56 @@ def test_explore_counts_a_form_id_associated_external_submit_too():
     assert snap["forms"][0]["destructive"] is True, (
         "an externally-associated (form='id') destructive submit must still "
         "count toward the exactly-one check"
+    )
+
+
+def test_explore_falls_back_to_label_priority_when_every_control_ties_at_one_rank():
+    """BUGS.md 2026-08-26 (part b): React Native Web renders every control as
+    `button.css-<hash>` with no semantic landmark, so all of them tie at
+    rank 4 and a stable sort is equivalent to plain DOM order -- on
+    isekaizero.com's storyline page this put the one control that mattered
+    ("Start Now") at position 77 of 78, past every probe/action budget in
+    the family. This fixture reproduces the flat-rank shape (7 plain
+    buttons, no landmark wrapper): "Start Now" is LAST in the DOM but must
+    now sort FIRST via the label-priority fallback."""
+    res = CliRunner().invoke(cli, ["explore", "--url", FLAT_RANK_FIXTURE.as_uri()])
+    if res.exit_code != 0:
+        msg = str(res.exception or res.output)
+        if "Executable doesn't exist" in msg or "playwright install" in msg:
+            pytest.skip("Chromium not installed for Playwright")
+        raise AssertionError(msg)
+    snap = json.loads(res.output)
+    interactive = snap["interactive"]
+    assert interactive[0]["text"] == "Start Now", (
+        f"the one action-shaped label did not sort to the front: {interactive}"
+    )
+    assert interactive[0]["rank"] == 0
+    # a nav-shaped label is demoted below the neutral middle, not just below
+    # the promoted one
+    home = next(e for e in interactive if e["text"] == "Home")
+    assert home["rank"] == 2
+
+
+def test_explore_does_not_apply_the_rank_fallback_when_ranks_already_differ():
+    """The fallback must be narrow: a normal page whose landmark-based ranks
+    already discriminate (this fixture's row-edit buttons sit directly in
+    <main> with no wrapping <form>/<nav>, ranking as CTAs) must keep today's
+    behavior completely unchanged -- no relabeling by keyword, no reordering
+    beyond the existing rank sort."""
+    res = CliRunner().invoke(cli, ["explore", "--url", FIXTURE.as_uri()])
+    if res.exit_code != 0:
+        msg = str(res.exception or res.output)
+        if "Executable doesn't exist" in msg or "playwright install" in msg:
+            pytest.skip("Chromium not installed for Playwright")
+        raise AssertionError(msg)
+    snap = json.loads(res.output)
+    ranks = {e["rank"] for e in snap["interactive"]}
+    assert len(ranks) > 1, "fixture must already have non-uniform ranks for this test to mean anything"
+    edits = [e for e in snap["interactive"] if e["text"] == "Edit"]
+    assert all(e["rank"] == 0 for e in edits), (
+        "row-level CTA buttons must keep their real landmark-based rank, "
+        "not a keyword-guessed one -- none of their labels even match the "
+        "fallback's own keyword lists"
     )
 
 
