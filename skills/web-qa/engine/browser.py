@@ -277,7 +277,16 @@ _SNAPSHOT_JS = r"""
     const DESTRUCTIVE = /\b(pay|checkout|purchase|place order|delete|remove|cancel account|unsubscribe|sign\s*up|register|create account)\b/;
     const LOGIN = /\b(log\s*in|sign\s*in)\b/;
     const hasPassword = fields.some((x) => x.type === 'password');
-    const destructive = DESTRUCTIVE.test(text) || (hasPassword && !LOGIN.test(text));
+    // A form whose OWN submit is a login action is never destructive, no matter
+    // what else the whole form's text contains -- a login commonly nests a
+    // "Don't have an account? Sign up" cross-link inside the SAME <form>, and
+    // "sign up" alone would otherwise satisfy DESTRUCTIVE against the whole-form
+    // text below (found live on quizsquirrel.com's /login, 2026-09-16/18). Only
+    // the SUBMIT's own wording earns this exemption -- the whole-form scan stays
+    // exactly as-is for every other form shape, so this narrows nothing else.
+    const submitText = (submitEl ? (submitEl.innerText || submitEl.value || '') : '').toLowerCase();
+    const isLoginSubmit = LOGIN.test(submitText);
+    const destructive = !isLoginSubmit && (DESTRUCTIVE.test(text) || (hasPassword && !LOGIN.test(text)));
     forms.push({ selector: sel(f), fields, submit: submitEl ? sel(submitEl) : null, destructive });
   }
 

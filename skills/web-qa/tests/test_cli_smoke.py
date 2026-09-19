@@ -20,6 +20,7 @@ from engine.cli import cli
 _FIXTURES = Path(__file__).parent / "fixtures"
 FIXTURE = (_FIXTURES / "form.html").resolve()
 HIDDEN_DUP_FIXTURE = (_FIXTURES / "dup_hidden.html").resolve()
+LOGIN_WITH_SIGNUP_LINK_FIXTURE = (_FIXTURES / "login_with_signup_link.html").resolve()
 
 
 def _run_flow(tmp_path, steps, url=None):
@@ -185,6 +186,39 @@ def test_explore_smoke(tmp_path):
     assert all(
         "nth=" in s for s in sels
     ), "non-unique selectors need an nth disambiguator"
+
+
+def test_explore_does_not_misclassify_a_login_form_with_a_signup_cross_link():
+    """BUGS.md 2026-09-16/18: a login form's own text includes a nested "Don't
+    have an account? Sign up" cross-link inside the SAME <form> -- "sign up"
+    alone used to satisfy the whole-form DESTRUCTIVE regex and misclassify an
+    ordinary, idempotent login as destructive. The submit itself says "Sign
+    in", so it must now be exempt regardless of the cross-link. A second,
+    genuinely destructive form on the same page proves the fix does not widen
+    into a blanket exemption -- only a login-shaped SUBMIT is spared."""
+    res = CliRunner().invoke(
+        cli, ["explore", "--url", LOGIN_WITH_SIGNUP_LINK_FIXTURE.as_uri()]
+    )
+    if res.exit_code != 0:
+        msg = str(res.exception or res.output)
+        if "Executable doesn't exist" in msg or "playwright install" in msg:
+            pytest.skip("Chromium not installed for Playwright")
+        raise AssertionError(msg)
+    snap = json.loads(res.output)
+    # submit selectors are CSS, not text -- resolve each form by its fields instead
+    login_form = next(
+        f for f in snap["forms"] if any(x["name"] == "password" for x in f["fields"])
+    )
+    assert login_form["destructive"] is False, (
+        "login form misclassified destructive by its own signup cross-link"
+    )
+    delete_form = next(
+        f for f in snap["forms"] if any(x["name"] == "confirm" for x in f["fields"])
+    )
+    assert delete_form["destructive"] is True, (
+        "genuinely destructive form must still be flagged -- the fix must not "
+        "widen into a blanket exemption"
+    )
 
 
 def test_flow_passes_and_validates_each_step(tmp_path):
