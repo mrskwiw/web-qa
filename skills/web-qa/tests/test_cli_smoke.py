@@ -15,7 +15,7 @@ from pathlib import Path
 import pytest
 from click.testing import CliRunner
 
-from engine.cli import cli
+from engine.cli import _emit, _truncate_for_stdout, cli
 
 _FIXTURES = Path(__file__).parent / "fixtures"
 FIXTURE = (_FIXTURES / "form.html").resolve()
@@ -37,6 +37,59 @@ def _run_flow(tmp_path, steps, url=None):
             pytest.skip("Chromium not installed for Playwright")
         raise AssertionError(f"flow failed: {msg}")
     return json.loads(res.output)
+
+
+def test_truncate_for_stdout_shortens_only_content_after():
+    """BUGS.md 2026-08-21: `content_after` can run to 20,000 chars and appears
+    once per step, dominating an agent's context for no benefit once the full
+    text is on disk. The stdout copy must shorten it with a disclosure; the
+    file (checked in test_emit_* below) must not."""
+    long_text = "x" * 900
+    payload = {
+        "steps": [
+            {"bundle": {"content_after": long_text, "url_after": "https://e.com"}},
+        ]
+    }
+    thin = _truncate_for_stdout(payload, "out.json")
+    shown = thin["steps"][0]["bundle"]["content_after"]
+    assert len(shown) < len(long_text)
+    assert shown.startswith("x" * 500)
+    assert "showing 500 of 900 chars" in shown
+    assert "out.json" in shown
+    # a field NOT named content_after is never touched, however long
+    assert thin["steps"][0]["bundle"]["url_after"] == "https://e.com"
+
+
+def test_truncate_for_stdout_leaves_a_short_content_after_alone():
+    payload = {"content_after": "short"}
+    assert _truncate_for_stdout(payload, "out.json") == payload
+
+
+def test_emit_truncates_stdout_but_writes_the_full_file_when_output_is_given(
+    tmp_path, capsys
+):
+    long_text = "y" * 900
+    out = tmp_path / "bundle.json"
+    _emit({"content_after": long_text}, str(out))
+
+    printed = json.loads(capsys.readouterr().out)
+    assert len(printed["content_after"]) < 900
+    assert "showing 500 of 900 chars" in printed["content_after"]
+
+    on_disk = json.loads(out.read_text(encoding="utf-8"))
+    assert on_disk["content_after"] == long_text, (
+        "the --output file must always carry the FULL content, never the "
+        "shortened stdout excerpt"
+    )
+
+
+def test_emit_does_not_truncate_stdout_when_output_is_omitted(capsys):
+    """Omitting --output must behave EXACTLY as before this change -- nothing
+    is ever silently lost; only passing --output can shrink what's echoed."""
+    long_text = "z" * 900
+    _emit({"content_after": long_text}, None)
+    printed = json.loads(capsys.readouterr().out)
+    assert printed["content_after"] == long_text
 
 
 def test_act_emits_gated_bundle(tmp_path):
