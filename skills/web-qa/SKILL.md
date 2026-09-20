@@ -167,6 +167,17 @@ A headed browser opens. The human drives — logs in, opens the creators, walks 
 - **Pair it with `--save-session`.** The human logs in and clears the challenge once; every later `explore`/`act`/`flow` replays that session headlessly. This is the cheapest route through a wall you must not automate (§3a).
 - **Credentials are redacted in the page**, before any value reaches Python — `type="password"` and anything whose name/id/placeholder/autocomplete looks credential-shaped. Recording a real login is safe by construction; keystrokes are also coalesced per field, so a password can't leak letter by letter.
 
+### 3a-ter. Borrowing a session from your own everyday browser
+
+`record` still drives a Playwright-controlled browser, which some bot-detection specifically fingerprints as automation regardless of who's clicking. When even that wall won't clear, the fastest path is not to authenticate at all — borrow the cookies + localStorage from a browser you're *already* logged into, since that session is indistinguishable from any other real visit.
+
+Two ways to get there, same destination — a `storage_state.json` in exactly the shape `--session`/`--save-session` already read and write (`{"user_agent": "...", "storage_state": {"cookies": [...], "origins": [{"origin": "...", "localStorage": [...]}]}}`):
+
+- **The extension** (`browser-extension/` at the repo root, in-house use only — load it via the browser's own "load unpacked extension" developer mode). Open the target site in a tab where you're already logged in, click the extension icon, click **Export Session** — it reads that tab's cookies (via the browser's own cookie API, so `HttpOnly` cookies are included, unlike `document.cookie`) and localStorage, and downloads a ready-to-use bundle to your Downloads folder. Point `--session` at it.
+- **By hand, no extension needed.** In the browser you're already logged into: DevTools → Application → Cookies (copy each cookie's `name`/`value`/`domain`/`path`/`secure`/`httpOnly`/`sameSite`) and Local Storage (copy each `name`/`value`), and `navigator.userAgent` from the Console. Assemble them into the same JSON shape by hand and save it.
+
+**Either way, the captured `user_agent` MUST be the real value from that browser, never assumed.** A session is bound to the UA+IP fingerprint it was issued under (§ Conventions); replaying it under Playwright's default Chromium UA reads as a fingerprint mismatch, not a bad cookie, and cannot be told apart from an expired token symptomatically — you'll misdiagnose it as needing a fresh login, which is the one thing that cannot help.
+
 **Then build the map from the recording — that is your job, not the engine's.** `summary` in the output gives you the deterministic skeleton (`screens`, `interactions_by_path`, `api`, `counts`); the engine deliberately stops there. Turn it into a map by naming what each surface *is* and what it is *for*: group screens into the app's real areas, describe each option/setting and its effect, note which controls are disabled or `incomplete`, record the observed API contract, and call out surfaces reached only manually (they are invisible to every automated crawl, so they need documenting most). Recorded selectors are chosen to be replayable — quote them, preferring `selector`, with `text_selector` as the readable alternative.
 
 A recording is also the seed for automation: a journey the human demonstrated once can be replayed as a `flow` steps file built from the recorded selectors and values.
