@@ -8,7 +8,9 @@ browser, perform one requested :class:`~engine.models.Action`, and capture a ful
 
 from __future__ import annotations
 
+import asyncio
 import json
+import sys
 from pathlib import Path
 from typing import Any, List, Optional
 
@@ -380,12 +382,15 @@ _STATE_JS = (
 
 
 # URL patterns dropped when a run only cares about structure. Measured against
-# isekaizero.com, where the full page costs 177 requests: blocking these leaves
-# 56 and finds MORE controls, because broken images stop occluding what is under
-# them.
+# isekaizero.com over 4 loads per condition: requests fall from a median of 184
+# to 46 (~75%), which is the entire point on a rate-limited crawl. Control counts
+# were 162 median unblocked vs 152 blocked, with heavily overlapping ranges
+# (157-172 vs 120-168) because the page rotates its content per load -- so a
+# small loss cannot be ruled out, and any single-run comparison here is noise.
+# Re-measure with repeats before trusting a claim about this trade.
 #
-# The three exclusions are each load-bearing, and each was established by
-# experiment rather than assumption:
+# The exclusions are each load-bearing, and each was established by experiment
+# rather than assumption:
 #
 # * FONTS ARE NOT BLOCKED. This looks like the safest thing in the list and is
 #   the most dangerous. Blocking fonts took isekaizero from 159 controls to
@@ -397,9 +402,33 @@ _STATE_JS = (
 #   (getBoundingClientRect + computed display/visibility), so dropping CSS
 #   collapses real controls to zero size and reveals normally-hidden menus.
 # * SCRIPTS ARE NOT BLOCKED. An SPA has no DOM without them.
+# * SVG IS NOT BLOCKED. It is nominally an image, but it is what icon buttons,
+#   nav glyphs and logos are actually made of -- the same shape as the font
+#   failure above. Measurement settled it rather than argument: dropping it from
+#   the list cost ONE request out of 46. Zero benefit against a real risk to the
+#   controls the map exists to record.
 _BLOCKED_URL_PATTERNS = [
-    "*.png", "*.jpg", "*.jpeg", "*.gif", "*.webp", "*.avif", "*.svg",
+    "*.png", "*.jpg", "*.jpeg", "*.gif", "*.webp", "*.avif",
     "*.ico", "*.bmp", "*.mp4", "*.webm", "*.mp3", "*.wav", "*.ogg",
+]
+
+# COMPLETION_AND_OPTIMIZATION_PLAN.md v2.2, X-M1 (2026-09-22): opt-in, conservative
+# Chromium flags that cut per-instance baseline RSS in headless/automation contexts.
+# Matters most for `SKILL.md`'s fan-out orchestration, where ~4-6 of these launch
+# concurrently -- every flag here is paid once per subagent. Deliberately does NOT
+# include `--single-process`: it destabilizes Playwright's own CDP connection and
+# would trade a memory saving for flaky runs, which is a worse failure mode than the
+# memory pressure this flag exists to reduce.
+_LOW_MEMORY_ARGS = [
+    "--disable-dev-shm-usage",
+    "--disable-gpu",
+    "--disable-extensions",
+    "--disable-background-networking",
+    "--disable-default-apps",
+    "--disable-sync",
+    "--metrics-recording-only",
+    "--mute-audio",
+    "--no-first-run",
 ]
 
 
@@ -418,8 +447,10 @@ class BrowserController:
         storage_state: Optional[Any] = None,
         user_agent: Optional[str] = None,
         block_assets: bool = False,
+        low_memory: bool = False,
     ) -> None:
         self._block_assets = block_assets
+        self._low_memory = low_memory
         # How asset blocking actually resolved, set by launch(). Carried into the
         # sitemap so "I asked for blocking" and "blocking happened" can never
         # again be assumed to be the same statement.
@@ -478,9 +509,10 @@ class BrowserController:
     async def launch(self) -> None:
         self._pw = await async_playwright().start()
         browser_type = getattr(self._pw, self._engine.value)
-        self._browser = await browser_type.launch(
-            headless=self._headless, slow_mo=self._slowmo
-        )
+        launch_kwargs: dict = {"headless": self._headless, "slow_mo": self._slowmo}
+        if self._low_memory:
+            launch_kwargs["args"] = _LOW_MEMORY_ARGS
+        self._browser = await browser_type.launch(**launch_kwargs)
         ctx_kwargs: dict = {"viewport": self._viewport}
         if self._user_agent:
             ctx_kwargs["user_agent"] = self._user_agent
@@ -524,10 +556,24 @@ class BrowserController:
         Call this while the context is still open (e.g. at the end of a login flow),
         NOT after ``close()``. The recorded user-agent matters: a fingerprint-bound
         token is only valid when replayed under the same user-agent.
+
+        When no UA was pinned we record the one the browser ACTUALLY used, read from
+        the live page — never ``null``. A null here used to be silently poisonous:
+        the replay would fall through to its own default UA, which for a headless
+        run is the ``HeadlessChrome`` string, so a session established in a headed
+        login was replayed under a different fingerprint (and one that announces
+        itself as a bot). That reads as an expired token, and the misdiagnosis costs
+        a re-login every time.
         """
         state = await self.context.storage_state()
+        ua = user_agent or self._user_agent
+        if not ua:
+            try:
+                ua = await self.page.evaluate("() => navigator.userAgent")
+            except Exception:  # noqa: BLE001 — page already gone; better null than crash
+                ua = None
         bundle = {
-            "user_agent": user_agent or self._user_agent,
+            "user_agent": ua,
             "storage_state": state,
         }
         target = Path(path)
@@ -568,6 +614,49 @@ class BrowserController:
         self.page.on("response", self._on_response)
         # Attached after the main page exists, so it only fires for popups.
         self.context.on("page", self._on_popup)
+
+    # -- recording (a human drives; we watch) ------------------------------
+
+    async def install_recorder(self, script: str, on_event) -> None:
+        """Stream every interaction the human performs back into Python.
+
+        ``expose_binding`` + ``add_init_script`` are both **context**-scoped, so
+        the recorder survives full navigations and installs itself into popups and
+        new tabs automatically — the two places a page-scoped hook would go quietly
+        deaf. Must be called before the first navigation.
+
+        Events are pushed as they happen rather than polled, because a poll loses
+        whatever is buffered when a navigation destroys the execution context —
+        and the click that caused the navigation is exactly the one worth having.
+        """
+        await self.context.expose_binding(
+            "__qaRecord", lambda _source, event: on_event(event)
+        )
+        await self.context.add_init_script(script)
+
+    def wire_page(self, page: Page) -> None:
+        """Attach console/network capture to a page the human opened themselves."""
+        page.on(
+            "console",
+            lambda msg: self._console.append(
+                ConsoleMessage(level=msg.type, text=msg.text)
+            ),
+        )
+        page.on("pageerror", lambda exc: self._page_errors.append(str(exc)))
+        page.on("response", self._on_response)
+
+    def set_active_page(self, page: Page) -> None:
+        """Point capture at another tab (the human switched, or opened one)."""
+        self._page = page
+
+    def live_pages(self) -> List[Page]:
+        return [p for p in self.context.pages if not p.is_closed()]
+
+    def recorded_network(self) -> List[dict]:
+        return [c.to_dict() for c in self._network]
+
+    def console_errors(self) -> List[str]:
+        return [m.text for m in self._console if m.level == "error"]
 
     def _on_response(self, response) -> None:
         try:
@@ -613,7 +702,7 @@ class BrowserController:
         elif t is ActionType.CLICK:
             await self.page.click(_require(action.selector, "selector"))
         elif t is ActionType.FILL:
-            await self.page.fill(
+            await self._fill_verified(
                 _require(action.selector, "selector"), action.value or ""
             )
         elif t is ActionType.TYPE:
@@ -629,6 +718,13 @@ class BrowserController:
             await self.page.mouse.wheel(0, distance)
         elif t is ActionType.WAIT_FOR:
             await self.page.wait_for_selector(_require(action.selector, "selector"))
+        elif t is ActionType.PAUSE:
+            await self.wait_for_human(
+                message=action.text,
+                until_selector=action.selector,
+                until_url=action.url,
+                timeout_s=int(action.value) if action.value else 300,
+            )
         elif t is ActionType.SELECT:
             sel = _require(action.selector, "selector")
             option = action.value if action.value is not None else (action.text or "")
@@ -641,6 +737,92 @@ class BrowserController:
         else:  # pragma: no cover — enum is exhaustive
             raise ValueError(f"Unsupported action type: {t}")
         await self.page.wait_for_timeout(300)
+
+    async def _fill_verified(self, selector: str, value: str) -> None:
+        """``fill``, then prove the value actually landed — retrying as keystrokes.
+
+        Playwright's ``fill`` sets the value through the native property setter and
+        emits ONE synthetic ``input`` event. React Native Web (and some controlled
+        React inputs) bind their own handler and re-render from component state, so
+        the DOM value is reverted and the field ends up EMPTY — with no exception,
+        no console error, and a fully passing gate. Observed on isekaizero's persona
+        form, 2026-08-26; a green step that typed nothing is the worst kind of
+        failure this engine can produce, because it is invisible in the evidence.
+
+        ``type`` dispatches real per-character key events, which those handlers do
+        honour. We try the fast path first and fall back only when the read-back
+        disagrees, so ordinary inputs keep ``fill``'s speed and its ability to
+        replace existing text.
+        """
+        await self.page.fill(selector, value)
+        try:
+            landed = await self.page.input_value(selector, timeout=2000)
+        except Exception:  # noqa: BLE001 — not an <input>/<textarea>; nothing to verify
+            return
+        if landed == value:
+            return
+        # The value did not stick. Clear whatever partial state exists and type it.
+        await self.page.click(selector)
+        await self.page.keyboard.press("ControlOrMeta+a")
+        await self.page.keyboard.press("Delete")
+        await self.page.type(selector, value)
+
+    async def wait_for_human(
+        self,
+        message: Optional[str] = None,
+        until_selector: Optional[str] = None,
+        until_url: Optional[str] = None,
+        timeout_s: int = 300,
+        poll_ms: int = 500,
+    ) -> bool:
+        """Block until a human finishes something in the visible browser window.
+
+        The escape hatch for walls a QA tool must not pick: a bot challenge
+        (Turnstile/reCAPTCHA), MFA, an SSO redirect, 3-D Secure. SKILL.md's rule is
+        that defeating these is an arms race we stay out of — but a human clearing
+        one by hand, once, inside the flow's own context, is not defeating anything.
+        Every later step then runs with the resulting state already in place.
+
+        Raises if the browser is headless: you cannot solve a challenge you cannot
+        see, and silently waiting out the timeout would turn an unsatisfiable step
+        into a slow no-op that later steps build on. Returns whether the resume
+        condition was actually observed — with no condition given, waiting out the
+        clock is the honest answer and returns True.
+        """
+        if self._headless:
+            raise RuntimeError(
+                "A 'pause' step needs a browser the human can see — re-run this flow "
+                "with --no-headless. (Refusing to wait blindly in headless mode: the "
+                "challenge could never be solved and later steps would run on an "
+                "unmet precondition.)"
+            )
+        # stderr, not stdout: stdout carries the flow's JSON result.
+        print(
+            f"\n>>> PAUSED — {message or 'finish the step in the browser window.'}",
+            file=sys.stderr,
+            flush=True,
+        )
+        if until_selector:
+            cond = f"until {until_selector!r} appears"
+        elif until_url:
+            cond = f"until the URL contains {until_url!r}"
+        else:
+            cond = "for the full window (no resume condition given)"
+        print(f">>> Waiting {cond}, up to {timeout_s}s.\n", file=sys.stderr, flush=True)
+
+        waited = 0
+        while waited < timeout_s * 1000:
+            if until_url and until_url in self.page.url:
+                return True
+            if until_selector:
+                try:
+                    if await self.is_present(until_selector):
+                        return True
+                except Exception:  # noqa: BLE001 — mid-navigation; retry next poll
+                    pass
+            await asyncio.sleep(poll_ms / 1000)
+            waited += poll_ms
+        return not (until_selector or until_url)
 
     async def settle(self, ms: int) -> None:
         """Extra idle wait after an action — for slow SPA transitions/XHR to land

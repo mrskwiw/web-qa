@@ -113,6 +113,7 @@ def _controller(
     headless: bool,
     session: str | None = None,
     user_agent: str | None = None,
+    low_memory: bool = False,
 ) -> BrowserController:
     """Build a BrowserController, seeding a saved auth session when provided.
 
@@ -125,6 +126,7 @@ def _controller(
         headless=headless,
         storage_state=storage_state,
         user_agent=user_agent or session_ua,
+        low_memory=low_memory,
     )
 
 
@@ -153,6 +155,13 @@ def cli() -> None:
 @click.option(
     "--output", type=click.Path(), default=None, help="Also write snapshot JSON here."
 )
+@click.option(
+    "--low-memory/--no-low-memory",
+    default=False,
+    help="Launch Chromium with conservative memory-reduction flags (weaker "
+    "baseline resource use; trades nothing functional). Worth it when several "
+    "of these run concurrently (fan-out) or the host is otherwise memory-tight.",
+)
 def explore(
     url: str,
     engine: str,
@@ -160,11 +169,12 @@ def explore(
     session: str | None,
     user_agent: str | None,
     output: str | None,
+    low_memory: bool,
 ) -> None:
     """Navigate to URL and emit a structured, ranked page snapshot as JSON."""
 
     async def run():
-        controller = _controller(engine, headless, session, user_agent)
+        controller = _controller(engine, headless, session, user_agent, low_memory)
         await controller.launch()
         try:
             await controller.navigate(url)
@@ -205,6 +215,13 @@ def explore(
 @click.option(
     "--output", type=click.Path(), default=None, help="Also write bundle JSON here."
 )
+@click.option(
+    "--low-memory/--no-low-memory",
+    default=False,
+    help="Launch Chromium with conservative memory-reduction flags (weaker "
+    "baseline resource use; trades nothing functional). Worth it when several "
+    "of these run concurrently (fan-out) or the host is otherwise memory-tight.",
+)
 def act(
     url: str,
     action_json: str,
@@ -214,6 +231,7 @@ def act(
     session: str | None,
     user_agent: str | None,
     output: str | None,
+    low_memory: bool,
 ) -> None:
     """Execute one action and emit a gated evidence bundle."""
     data = json.loads(action_json)
@@ -228,7 +246,7 @@ def act(
     )
 
     async def run():
-        controller = _controller(engine, headless, session, user_agent)
+        controller = _controller(engine, headless, session, user_agent, low_memory)
         await controller.launch()
         try:
             await controller.navigate(url)
@@ -327,6 +345,13 @@ def act(
 @click.option(
     "--output", type=click.Path(), default=None, help="Also write flow JSON here."
 )
+@click.option(
+    "--low-memory/--no-low-memory",
+    default=False,
+    help="Launch Chromium with conservative memory-reduction flags (weaker "
+    "baseline resource use; trades nothing functional). Worth it when several "
+    "of these run concurrently (fan-out) or the host is otherwise memory-tight.",
+)
 def flow(
     url: str,
     steps_path: str,
@@ -341,6 +366,7 @@ def flow(
     costs: bool,
     yes: bool,
     output: str | None,
+    low_memory: bool,
 ) -> None:
     """Run an ordered list of steps in ONE browser context (stateful, spec §4.2).
 
@@ -384,7 +410,7 @@ def flow(
         return
 
     async def run():
-        controller = _controller(engine, headless, session, user_agent)
+        controller = _controller(engine, headless, session, user_agent, low_memory)
         await controller.launch()
         results = []
         halted_at = None
@@ -513,6 +539,12 @@ def flow(
     "--browser", "engine", default=BrowserEngine.CHROMIUM.value, type=_ENGINE_CHOICE
 )
 @click.option("--user-agent", default=None, help="Pin the UA (see --save-session).")
+@click.option(
+    "--low-memory/--no-low-memory",
+    default=False,
+    help="Launch Chromium with conservative memory-reduction flags (weaker "
+    "baseline resource use; trades nothing functional).",
+)
 def record(
     url: str,
     output: str,
@@ -522,6 +554,7 @@ def record(
     max_minutes: int,
     engine: str,
     user_agent: str | None,
+    low_memory: bool,
 ) -> None:
     """Watch a HUMAN use the app, and capture every screen they reach.
 
@@ -541,7 +574,7 @@ def record(
     shots = Path(screenshot_dir) if screenshot_dir else None
 
     async def run():
-        controller = _controller(engine, False, session, user_agent)
+        controller = _controller(engine, False, session, user_agent, low_memory)
         await controller.launch()
 
         events: list[RecordedEvent] = []
@@ -700,6 +733,13 @@ def record(
 @click.option(
     "--output", type=click.Path(), default=None, help="Also write a11y JSON here."
 )
+@click.option(
+    "--low-memory/--no-low-memory",
+    default=False,
+    help="Launch Chromium with conservative memory-reduction flags (weaker "
+    "baseline resource use; trades nothing functional). Worth it when several "
+    "of these run concurrently (fan-out) or the host is otherwise memory-tight.",
+)
 def a11y(
     url: str,
     engine: str,
@@ -707,6 +747,7 @@ def a11y(
     session: str | None,
     user_agent: str | None,
     output: str | None,
+    low_memory: bool,
 ) -> None:
     """Deterministic accessibility (WCAG A/AA) audit of one page (spec §3d).
 
@@ -717,7 +758,7 @@ def a11y(
     """
 
     async def run():
-        controller = _controller(engine, headless, session, user_agent)
+        controller = _controller(engine, headless, session, user_agent, low_memory)
         await controller.launch()
         try:
             await controller.navigate(url)
@@ -863,6 +904,39 @@ def interact() -> None:
 @click.option(
     "--timeout-s", default=10.0, type=float, help="How long to wait for chromium to start."
 )
+@click.option(
+    "--low-memory/--no-low-memory",
+    default=False,
+    help="Launch Chromium with conservative memory-reduction flags. Worth it "
+    "here especially: this process is DETACHED and can outlive the agent turn "
+    "that started it if `stop` is forgotten (see `interact` --help).",
+)
+@click.option(
+    "--chrome-path",
+    default=None,
+    help="Launch this browser BINARY (real Chrome/Edge/Brave/a channel build) "
+    "instead of Playwright's bundled Chromium -- so the fingerprint is a real "
+    "browser's. For a HUMAN-driven session past a wall that flags automation "
+    "Chromium: you drive and clear the wall, this only observes. Not evasion "
+    "(no webdriver masking / synthetic input) -- it IS the real browser.",
+)
+@click.option(
+    "--real-chrome",
+    is_flag=True,
+    default=False,
+    help="Convenience for --chrome-path: auto-locate the installed Google Chrome.",
+)
+@click.option(
+    "--user-data-dir",
+    "user_data_dir",
+    default=None,
+    type=click.Path(),
+    help="Persistent profile dir (SURVIVES `stop`, unlike the default throwaway "
+    "temp profile) -- log in / clear a challenge once by hand, and every later "
+    "session reuses it. Use a DEDICATED dir, never your everyday Chrome's own "
+    "default profile (Chrome refuses remote debugging on that, and it would be "
+    "locked by any running Chrome).",
+)
 def interact_start(
     url: str,
     state_path: str,
@@ -870,12 +944,18 @@ def interact_start(
     user_agent: str | None,
     headless: bool,
     timeout_s: float,
+    low_memory: bool,
+    chrome_path: str | None,
+    real_chrome: bool,
+    user_data_dir: str | None,
 ) -> None:
-    """Launch a detached chromium and navigate to --url."""
+    """Launch a detached browser and navigate to --url."""
     try:
         result = start_interact_session(
             state_path, url, session=session, user_agent=user_agent,
-            headless=headless, timeout_s=timeout_s,
+            headless=headless, timeout_s=timeout_s, low_memory=low_memory,
+            chrome_path=chrome_path, real_chrome=real_chrome,
+            user_data_dir=user_data_dir,
         )
     except InteractError as exc:
         click.echo(json.dumps({"error": str(exc)}))
